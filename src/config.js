@@ -1,0 +1,36 @@
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const DEFAULT_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function numberFromEnv(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function boolFromEnv(value, fallback = false) {
+  if (value == null || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+}
+
+function trimRightSlash(value) {
+  return value.replace(/\/+$/, '');
+}
+
+export function loadConfig(env = process.env) {
+  const port = numberFromEnv(env.PORT, 7892);
+  const publicBaseUrl = trimRightSlash(env.PUBLIC_BASE_URL || `http://127.0.0.1:${port}`);
+
+  return {
+    port,
+    publicBaseUrl,
+    topicWebhookUrl: env.TOPIC_WEBHOOK_URL || '',
+    xianyuSendUrl: env.XIANYU_SEND_URL || 'http://127.0.0.1:7893/xianyu/send',
+    xianyuInboundToken: env.XIANYU_INBOUND_TOKEN || '',
+    agentReplyToken: env.AGENT_REPLY_TOKEN || '',
+    requestTimeoutMs: numberFromEnv(env.REQUEST_TIMEOUT_MS, 20000),
+    sessionTtlMs: numberFromEnv(env.SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),
+    mockXianyuSend: boolFromEnv(env.MOCK_XIANYU_SEND, false)
+  };
+}

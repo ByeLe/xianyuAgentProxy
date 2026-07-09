@@ -1,0 +1,20 @@
+{
+  "name": "xianyu-agent-proxy",
+  "version": "0.1.0",
+  "description": "Koa bridge for XianYu messages, topic agents, and reply callbacks.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@koa/router": "^15.7.0",
+    "dotenv": "^16.4.7",
+    "koa": "^2.15.3",
+    "koa-bodyparser": "^4.4.1"
+  }
+}
