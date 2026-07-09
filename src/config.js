@@ -27,6 +27,7 @@ export function loadConfig(env = process.env) {
     publicBaseUrl,
     topicWebhookUrl: env.TOPIC_WEBHOOK_URL || '',
     xianyuSendUrl: env.XIANYU_SEND_URL || 'http://127.0.0.1:7893/xianyu/send',
+    xianyuSendToken: env.XIANYU_SEND_TOKEN || '',
     xianyuInboundToken: env.XIANYU_INBOUND_TOKEN || '',
     agentReplyToken: env.AGENT_REPLY_TOKEN || '',
     requestTimeoutMs: numberFromEnv(env.REQUEST_TIMEOUT_MS, 20000),

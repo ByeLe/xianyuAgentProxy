@@ -38,6 +38,7 @@ test('闲鱼消息会被投递到话题群，并返回 correlation_id', async ()
     publicBaseUrl: 'http://proxy.local',
     topicWebhookUrl: 'http://topic.local/webhook',
     xianyuSendUrl: 'http://xianyu.local/send',
+    xianyuSendToken: '',
     xianyuInboundToken: '',
     agentReplyToken: '',
     requestTimeoutMs: 1000,
@@ -48,8 +49,8 @@ test('闲鱼消息会被投递到话题群，并返回 correlation_id', async ()
   const app = createApp({
     config,
     store: new SessionStore({ ttlMs: config.sessionTtlMs }),
-    postJson: async (url, payload) => {
-      calls.push({ url, payload });
+    postJson: async (url, payload, options) => {
+      calls.push({ url, payload, options });
       return { status: 200, body: { ok: true, action: 'queued' } };
     }
   });
@@ -82,6 +83,7 @@ test('agent 回写会转发到闲鱼发送接口', async () => {
     publicBaseUrl: 'http://proxy.local',
     topicWebhookUrl: 'http://topic.local/webhook',
     xianyuSendUrl: 'http://xianyu.local/send',
+    xianyuSendToken: 'send-secret',
     xianyuInboundToken: '',
     agentReplyToken: 'secret',
     requestTimeoutMs: 1000,
@@ -100,8 +102,8 @@ test('agent 回写会转发到闲鱼发送接口', async () => {
   const app = createApp({
     config,
     store,
-    postJson: async (url, payload) => {
-      calls.push({ url, payload });
+    postJson: async (url, payload, options) => {
+      calls.push({ url, payload, options });
       return { status: 200, body: { ok: true, sent: true } };
     }
   });
@@ -123,6 +125,7 @@ test('agent 回写会转发到闲鱼发送接口', async () => {
     assert.equal(calls[0].payload.conversation_id, 'cid_1');
     assert.equal(calls[0].payload.buyer_id, 'buyer_1');
     assert.equal(calls[0].payload.text, '在的，可以拍。');
+    assert.equal(calls[0].options.headers.Authorization, 'Bearer send-secret');
   } finally {
     server.close();
   }
@@ -133,6 +136,7 @@ test('agent 回写鉴权失败会返回 401', async () => {
     publicBaseUrl: 'http://proxy.local',
     topicWebhookUrl: 'http://topic.local/webhook',
     xianyuSendUrl: 'http://xianyu.local/send',
+    xianyuSendToken: '',
     xianyuInboundToken: '',
     agentReplyToken: 'secret',
     requestTimeoutMs: 1000,

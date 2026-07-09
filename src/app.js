@@ -131,8 +131,12 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
     }
 
     const sendPayload = buildXianyuSendPayload(session, input.reply_text);
+    const sendHeaders = config.xianyuSendToken
+      ? { Authorization: `Bearer ${config.xianyuSendToken}` }
+      : {};
     const xianyuResult = await postJson(config.xianyuSendUrl, sendPayload, {
-      timeoutMs: config.requestTimeoutMs
+      timeoutMs: config.requestTimeoutMs,
+      headers: sendHeaders
     });
 
     const updated = store.update(input.correlation_id, {

@@ -22,6 +22,74 @@
 
 ## 快速开始
 
+### Docker Compose 推荐
+
+日常调试建议直接用 Docker Compose，一条命令同时跑 Node apiproxy 和 Python 闲鱼桥接，不需要开多个终端。
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`，至少填这几项：
+
+```env
+PUBLIC_BASE_URL=http://192.168.0.106:7892
+TOPIC_WEBHOOK_URL=你的咸鱼话题群 Webhook
+XIANYU_COOKIES=你的闲鱼登录 cookie
+```
+
+然后启动：
+
+```bash
+docker compose up --build
+```
+
+后台启动：
+
+```bash
+docker compose up -d --build
+```
+
+看日志：
+
+```bash
+docker compose logs -f agent-proxy
+docker compose logs -f xianyu-bridge
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+两个服务的端口：
+
+- Node apiproxy：http://127.0.0.1:7892
+- Python 闲鱼桥接：http://127.0.0.1:7893
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:7892/health
+curl http://127.0.0.1:7893/health
+```
+
+注意：`/xianyu/send` 是 `POST` 接口，浏览器直接打开 `http://127.0.0.1:7893/xianyu/send` 不会发送消息。浏览器调试请打开 `/health`。
+
+Compose 内部会自动把：
+
+```env
+XIANYU_SEND_URL=http://xianyu-bridge:7893/xianyu/send
+PROXY_MESSAGE_URL=http://agent-proxy:7892/xianyu/message
+```
+
+连起来。`PUBLIC_BASE_URL` 仍然要写成 agent 能访问到的地址，例如你的局域网地址 `http://192.168.0.106:7892`。
+
+第一次构建 `xianyu-bridge` 镜像时，会拉取 `cv-cat/XianYuApis` 并安装 Python/Node 依赖，所以会慢一点。
+
+### Node 单服务调试
+
 ```bash
 npm install
 cp .env.example .env
@@ -135,6 +203,7 @@ GET /sessions/:correlation_id
 两个 token 都是可选的：
 
 - `XIANYU_INBOUND_TOKEN`：开启后，Python 调 `/xianyu/message` 必须带 `Authorization: Bearer <token>`。
+- `XIANYU_SEND_TOKEN`：开启后，Node 调 Python `/xianyu/send` 必须带 `Authorization: Bearer <token>`。
 - `AGENT_REPLY_TOKEN`：开启后，agent 调 `/agent/reply` 必须带 `Authorization: Bearer <token>`。
 
 如果设置了 `AGENT_REPLY_TOKEN`，本服务会把 `apiproxy_reply_token` 一并投递到话题群 payload，方便 agent 回写。

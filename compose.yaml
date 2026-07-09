@@ -1,0 +1,34 @@
+services:
+  agent-proxy:
+    build:
+      context: .
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: 7892
+      XIANYU_SEND_URL: http://xianyu-bridge:7893/xianyu/send
+    ports:
+      - "7892:7892"
+    restart: unless-stopped
+
+  xianyu-bridge:
+    build:
+      context: ./docker/xianyu-bridge
+      args:
+        XIANYU_APIS_REPO: ${XIANYU_APIS_REPO:-https://github.com/cv-cat/XianYuApis.git}
+        XIANYU_APIS_REF: ${XIANYU_APIS_REF:-master}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BRIDGE_HOST: 0.0.0.0
+      BRIDGE_PORT: 7893
+      PROXY_MESSAGE_URL: http://agent-proxy:7892/xianyu/message
+      PROXY_INBOUND_TOKEN: ${XIANYU_INBOUND_TOKEN:-}
+      BRIDGE_SEND_TOKEN: ${XIANYU_SEND_TOKEN:-}
+    ports:
+      - "7893:7893"
+    depends_on:
+      - agent-proxy
+    restart: unless-stopped
