@@ -12,8 +12,7 @@ from loguru import logger
 import websockets
 
 from goofish_live import XianyuLive
-from message import make_text
-from utils.goofish_utils import decrypt, generate_mid, get_session_cookies_str
+from utils.goofish_utils import decrypt, generate_mid, generate_uuid, get_session_cookies_str
 
 logger.remove()
 logger.add(sys.stderr, diagnose=False, level=os.getenv("LOG_LEVEL", "INFO"))
@@ -308,7 +307,7 @@ class XianyuAgentBridge(XianyuLive):
 
         cid = body.get("conversation_id") or body.get("cid")
         buyer_id = body.get("buyer_id") or body.get("toid") or body.get("receiver_id")
-        text = body.get("text") or body.get("reply_text")
+        text = str(body.get("text") or body.get("reply_text") or "").strip()
 
         if not cid or not buyer_id or not text:
             return web.json_response({
@@ -316,15 +315,75 @@ class XianyuAgentBridge(XianyuLive):
                 "error": "缺少 conversation_id、buyer_id 或 text"
             }, status=400)
 
-        await self.send_msg(self.active_ws, str(cid), str(buyer_id), make_text(str(text)))
-        logger.info(f"sent xianyu reply cid={cid} buyer_id={buyer_id}")
+        send_mid = await self.send_text_reply(self.active_ws, str(cid), str(buyer_id), text)
+        logger.info(
+            "sent xianyu reply cid={} buyer_id={} mid={} preview={}",
+            cid,
+            buyer_id,
+            send_mid,
+            preview_text(text),
+        )
 
         return web.json_response({
             "ok": True,
             "correlation_id": body.get("correlation_id", ""),
             "conversation_id": str(cid),
             "buyer_id": str(buyer_id),
+            "mid": send_mid,
         })
+
+    async def send_text_reply(self, websocket, cid, toid, text):
+        payload = {
+            "contentType": 1,
+            "text": {
+                "text": text
+            }
+        }
+        encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("utf-8")
+        send_mid = generate_mid()
+        message = {
+            "lwp": "/r/MessageSend/sendByReceiverScope",
+            "headers": {
+                "mid": send_mid
+            },
+            "body": [
+                {
+                    "uuid": generate_uuid(),
+                    "cid": f"{cid}@goofish",
+                    "conversationType": 1,
+                    "content": {
+                        "contentType": 101,
+                        "custom": {
+                            "summary": text,
+                            "data": encoded,
+                            "title": "",
+                            "type": 1,
+                            "degrade": ""
+                        }
+                    },
+                    "redPointPolicy": 0,
+                    "extension": {
+                        "extJson": "{}",
+                        "reminderContent": text,
+                        "detailNotice": text
+                    },
+                    "ctx": {
+                        "appVersion": "1.0",
+                        "platform": "web"
+                    },
+                    "mtags": {},
+                    "msgReadStatusSetting": 1
+                },
+                {
+                    "actualReceivers": [
+                        f"{toid}@goofish",
+                        f"{self.myid}@goofish"
+                    ]
+                }
+            ]
+        }
+        await websocket.send(json.dumps(message, ensure_ascii=False))
+        return send_mid
 
     async def websocket_loop(self):
         headers = {

@@ -30,11 +30,12 @@ function normalizeInboundMessage(body) {
 function normalizeReply(body) {
   assertHttp(body && typeof body === 'object', 400, '请求体必须是 JSON 对象');
   assertHttp(body.correlation_id, 400, '缺少 correlation_id');
-  assertHttp(body.reply_text, 400, '缺少 reply_text');
+  const replyText = String(body.reply_text || '').trim();
+  assertHttp(replyText, 400, '缺少 reply_text');
 
   return {
     correlation_id: String(body.correlation_id),
-    reply_text: String(body.reply_text)
+    reply_text: replyText
   };
 }
 
