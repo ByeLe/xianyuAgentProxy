@@ -32,6 +32,53 @@ def bearer_token(request):
     return request.headers.get("x-apiproxy-token", "")
 
 
+def first_value(value):
+    if isinstance(value, list):
+        for item in value:
+            if item not in (None, ""):
+                return item
+        return None
+    return value
+
+
+def find_chat_nodes(value):
+    nodes = []
+    if isinstance(value, dict):
+        if "10" in value and "2" in value:
+            nodes.append(value)
+        for child in value.values():
+            nodes.extend(find_chat_nodes(child))
+    elif isinstance(value, list):
+        for child in value:
+            nodes.extend(find_chat_nodes(child))
+    return nodes
+
+
+def extract_chat_event(payload, myid):
+    for node in find_chat_nodes(payload):
+        extension = first_value(node.get("10"))
+        if not isinstance(extension, dict):
+            continue
+
+        buyer_id = first_value(extension.get("senderUserId"))
+        message_text = first_value(extension.get("reminderContent"))
+        cid = first_value(node.get("2"))
+
+        if not buyer_id or not message_text or not cid:
+            continue
+        if str(buyer_id) == str(myid):
+            return None
+
+        return {
+            "conversation_id": str(cid).split("@")[0],
+            "buyer_id": str(buyer_id),
+            "buyer_name": str(first_value(extension.get("reminderTitle")) or ""),
+            "message_text": str(message_text),
+            "raw": payload,
+        }
+    return None
+
+
 class XianyuAgentBridge(XianyuLive):
     def __init__(self, cookies_str):
         super().__init__(cookies_str)
@@ -167,27 +214,16 @@ class XianyuAgentBridge(XianyuLive):
         try:
             decrypted = decrypt(data)
             payload = json.loads(decrypted)
-            extension = payload["1"]["10"]
-
-            buyer_id = str(extension["senderUserId"])
-            if buyer_id == str(self.myid):
+            event = extract_chat_event(payload, self.myid)
+            if not event:
                 return
 
-            buyer_name = extension.get("reminderTitle", "")
-            message_text = extension.get("reminderContent", "")
-            if not message_text:
-                return
-
-            cid = str(payload["1"]["2"]).split("@")[0]
-            event = {
-                "conversation_id": cid,
-                "buyer_id": buyer_id,
-                "buyer_name": buyer_name,
-                "message_text": message_text,
-                "raw": payload,
-            }
-
-            logger.info(f"received xianyu message cid={cid} buyer={buyer_name}: {message_text}")
+            logger.info(
+                "received xianyu message cid={} buyer={}: {}",
+                event["conversation_id"],
+                event["buyer_name"],
+                event["message_text"],
+            )
             asyncio.create_task(self.forward_to_proxy(event))
         except Exception as error:
             logger.exception(f"failed to parse xianyu message: {error}")
