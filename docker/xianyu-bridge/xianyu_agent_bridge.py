@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -54,6 +55,58 @@ def find_chat_nodes(value):
     return nodes
 
 
+def find_model_message_nodes(value):
+    nodes = []
+    if isinstance(value, dict):
+        message = value.get("message")
+        if isinstance(message, dict):
+            nodes.append(value)
+        for child in value.values():
+            nodes.extend(find_model_message_nodes(child))
+    elif isinstance(value, list):
+        for child in value:
+            nodes.extend(find_model_message_nodes(child))
+    return nodes
+
+
+def parse_custom_message_text(message):
+    extension = message.get("extension") or {}
+    reminder_content = first_value(extension.get("reminderContent"))
+    if reminder_content:
+        return str(reminder_content)
+
+    custom = ((message.get("content") or {}).get("custom") or {})
+    data = first_value(custom.get("data"))
+    if not data:
+        return ""
+
+    try:
+        decoded = base64.b64decode(str(data)).decode("utf-8")
+        payload = json.loads(decoded)
+    except Exception:
+        return ""
+
+    content_type = payload.get("contentType")
+    if content_type == 1:
+        return str(((payload.get("text") or {}).get("text")) or "")
+    if content_type == 2:
+        return "[图片]"
+    return str(payload.get("summary") or payload.get("text") or "")
+
+
+def summarize_payload(payload):
+    if isinstance(payload, dict):
+        top_keys = list(payload.keys())[:12]
+    else:
+        top_keys = []
+    return {
+        "type": type(payload).__name__,
+        "top_keys": top_keys,
+        "numeric_chat_nodes": len(find_chat_nodes(payload)),
+        "model_message_nodes": len(find_model_message_nodes(payload)),
+    }
+
+
 def extract_chat_event(payload, myid):
     for node in find_chat_nodes(payload):
         extension = first_value(node.get("10"))
@@ -63,6 +116,27 @@ def extract_chat_event(payload, myid):
         buyer_id = first_value(extension.get("senderUserId"))
         message_text = first_value(extension.get("reminderContent"))
         cid = first_value(node.get("2"))
+
+        if not buyer_id or not message_text or not cid:
+            continue
+        if str(buyer_id) == str(myid):
+            return None
+
+        return {
+            "conversation_id": str(cid).split("@")[0],
+            "buyer_id": str(buyer_id),
+            "buyer_name": str(first_value(extension.get("reminderTitle")) or ""),
+            "message_text": str(message_text),
+            "raw": payload,
+        }
+
+    for container in find_model_message_nodes(payload):
+        message = container.get("message") or {}
+        extension = message.get("extension") or {}
+
+        buyer_id = first_value(extension.get("senderUserId"))
+        message_text = parse_custom_message_text(message)
+        cid = first_value(message.get("cid")) or first_value(message.get("conversationId")) or first_value(container.get("cid"))
 
         if not buyer_id or not message_text or not cid:
             continue
@@ -175,6 +249,7 @@ class XianyuAgentBridge(XianyuLive):
                     async for raw_message in websocket:
                         message = json.loads(raw_message)
                         await self.ack_message(websocket, message)
+                        self.log_message_summary(message)
                         await self.handle_message(message, websocket)
             except Exception as error:
                 logger.exception(f"xianyu websocket disconnected: {error}")
@@ -198,6 +273,18 @@ class XianyuAgentBridge(XianyuLive):
             if key in headers:
                 ack["headers"][key] = headers[key]
         await websocket.send(json.dumps(ack))
+
+    def log_message_summary(self, message):
+        body = message.get("body") if isinstance(message, dict) else None
+        sync_package = (body or {}).get("syncPushPackage") if isinstance(body, dict) else None
+        if isinstance(sync_package, dict):
+            data_items = sync_package.get("data") or []
+            logger.info("received sync push package items={}", len(data_items))
+            return
+
+        lwp = message.get("lwp") if isinstance(message, dict) else None
+        if lwp:
+            logger.debug("received ws frame lwp={}", lwp)
 
     async def handle_message(self, message, websocket):
         try:
@@ -226,10 +313,10 @@ class XianyuAgentBridge(XianyuLive):
         try:
             event = extract_chat_event(payload, self.myid)
             if not event:
-                logger.debug(
-                    "xianyu sync data ignored source={} payload_type={}",
+                logger.info(
+                    "xianyu sync data ignored source={} summary={}",
                     source,
-                    type(payload).__name__,
+                    summarize_payload(payload),
                 )
                 return
 
