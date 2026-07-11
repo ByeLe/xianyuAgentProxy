@@ -38,6 +38,26 @@ function normalizeReply(body) {
   };
 }
 
+function previewText(value, max = 80) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}...`;
+}
+
+function maskId(value) {
+  const text = String(value || '');
+  if (text.length <= 8) return `${text.slice(0, 2)}***`;
+  return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
+function logInfo(event, details = {}) {
+  console.info(JSON.stringify({
+    ts: new Date().toISOString(),
+    event,
+    ...details
+  }));
+}
+
 function buildXianyuSendPayload(session, replyText) {
   return {
     correlation_id: session.correlation_id,
@@ -87,6 +107,15 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
     const session = store.create(input);
     const topicPayload = buildTopicPayload(session, config);
 
+    logInfo('xianyu.message.received', {
+      correlation_id: session.correlation_id,
+      conversation_id: session.conversation_id,
+      buyer_id: maskId(session.buyer_id),
+      buyer_name: session.buyer_name,
+      message_length: session.message_text.length,
+      message_preview: previewText(session.message_text)
+    });
+
     const topicResult = await postJson(config.topicWebhookUrl, topicPayload, {
       timeoutMs: config.requestTimeoutMs
     });
@@ -104,12 +133,27 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
       apiproxy_reply_url: topicPayload.apiproxy_reply_url,
       topic: topicResult.body
     };
+
+    logInfo('topic.webhook.queued', {
+      correlation_id: updated.correlation_id,
+      action: topicResult.body?.action,
+      trigger_id: topicResult.body?.triggerId,
+      session_id: topicResult.body?.target?.sessionId,
+      chat_id: topicResult.body?.target?.chatId
+    });
   });
 
   router.post('/agent/reply', requireOptionalBearer(config.agentReplyToken), async (ctx) => {
     const input = normalizeReply(ctx.request.body);
     const session = store.get(input.correlation_id);
     assertHttp(session, 404, '找不到 correlation_id 对应的闲鱼会话');
+
+    logInfo('agent.reply.received', {
+      correlation_id: input.correlation_id,
+      conversation_id: session.conversation_id,
+      reply_length: input.reply_text.length,
+      reply_preview: previewText(input.reply_text)
+    });
 
     if (config.mockXianyuSend) {
       const updated = store.update(input.correlation_id, {
@@ -127,6 +171,9 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
         status: updated.status,
         xianyu: updated.xianyu_response
       };
+      logInfo('xianyu.reply.mock_sent', {
+        correlation_id: updated.correlation_id
+      });
       return;
     }
 
@@ -151,6 +198,12 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
       status: updated.status,
       xianyu: xianyuResult.body
     };
+
+    logInfo('xianyu.reply.sent', {
+      correlation_id: updated.correlation_id,
+      conversation_id: updated.conversation_id,
+      xianyu_ok: xianyuResult.body?.ok
+    });
   });
 
   router.get('/sessions/:correlation_id', (ctx) => {

@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import time
+from collections import OrderedDict
 
 from aiohttp import ClientSession, ClientTimeout, web
 from loguru import logger
@@ -107,6 +108,105 @@ def summarize_payload(payload):
     }
 
 
+def masked_string(value):
+    text = str(value)
+    if len(text) <= 8:
+        return f"{text[:2]}***"
+    return f"{text[:4]}...{text[-4:]} len={len(text)}"
+
+
+def preview_text(value, max_length=80):
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_length:
+        return text
+    return f"{text[:max_length]}..."
+
+
+def shape_sample(value, path="$", depth=0, max_depth=5, max_items=8):
+    if depth > max_depth:
+        return [f"{path}:..."]
+
+    if isinstance(value, dict):
+        keys = list(value.keys())
+        lines = [f"{path}:dict keys={keys[:max_items]}"]
+        for key in keys[:max_items]:
+            lines.extend(shape_sample(value[key], f"{path}.{key}", depth + 1, max_depth, max_items))
+        return lines
+
+    if isinstance(value, list):
+        lines = [f"{path}:list len={len(value)}"]
+        for index, item in enumerate(value[:max_items]):
+            lines.extend(shape_sample(item, f"{path}[{index}]", depth + 1, max_depth, max_items))
+        return lines
+
+    if isinstance(value, str):
+        return [f"{path}:str len={len(value)}"]
+
+    return [f"{path}:{type(value).__name__}"]
+
+
+def interesting_paths(value, path="$", depth=0, max_depth=8):
+    if depth > max_depth:
+        return []
+
+    wanted = {
+        "1", "2", "7", "10", "cid", "conversationId", "message", "content",
+        "custom", "data", "extension", "senderUserId", "reminderContent",
+        "reminderTitle", "sendUserId", "receiverUserId", "text",
+    }
+    found = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if str(key) in wanted:
+                found.append(f"{child_path}:{type(child).__name__}")
+            found.extend(interesting_paths(child, child_path, depth + 1, max_depth))
+    elif isinstance(value, list):
+        for index, child in enumerate(value[:10]):
+            found.extend(interesting_paths(child, f"{path}[{index}]", depth + 1, max_depth))
+    return found
+
+
+def collect_goofish_ids(value):
+    ids = []
+    if isinstance(value, dict):
+        for child in value.values():
+            ids.extend(collect_goofish_ids(child))
+    elif isinstance(value, list):
+        for child in value:
+            ids.extend(collect_goofish_ids(child))
+    elif isinstance(value, str) and value.endswith("@goofish"):
+        ids.append(value.split("@")[0])
+    return list(OrderedDict.fromkeys(ids))
+
+
+def parse_history_message(entry, myid):
+    sender_id = str(entry.get("send_user_id", ""))
+    if not sender_id or sender_id == str(myid):
+        return None
+
+    message = entry.get("message") or {}
+    text = ""
+    content_type = message.get("contentType")
+    if content_type == 1:
+        text = str(((message.get("text") or {}).get("text")) or "")
+    elif content_type == 2:
+        text = "[图片]"
+    else:
+        text = str(message.get("summary") or message.get("text") or "")
+
+    if not text:
+        return None
+
+    return {
+        "buyer_id": sender_id,
+        "buyer_name": str(entry.get("send_user_name") or ""),
+        "message_text": text,
+        "message_id": str(entry.get("message_id") or ""),
+        "create_at": entry.get("create_at"),
+    }
+
+
 def extract_chat_event(payload, myid):
     for node in find_chat_nodes(payload):
         extension = first_value(node.get("10"))
@@ -165,6 +265,8 @@ class XianyuAgentBridge(XianyuLive):
         self.request_timeout = env_int("REQUEST_TIMEOUT_SECONDS", 20)
         self.http_host = os.getenv("BRIDGE_HOST", "0.0.0.0")
         self.http_port = env_int("BRIDGE_PORT", 7893)
+        self.seen_history_keys = OrderedDict()
+        self.max_seen_history_keys = env_int("MAX_SEEN_HISTORY_KEYS", 200)
 
     async def start(self):
         self.client = ClientSession(timeout=ClientTimeout(total=self.request_timeout))
@@ -274,6 +376,14 @@ class XianyuAgentBridge(XianyuLive):
                 ack["headers"][key] = headers[key]
         await websocket.send(json.dumps(ack))
 
+    def remember_history_key(self, key):
+        if key in self.seen_history_keys:
+            return False
+        self.seen_history_keys[key] = time.time()
+        while len(self.seen_history_keys) > self.max_seen_history_keys:
+            self.seen_history_keys.popitem(last=False)
+        return True
+
     def log_message_summary(self, message):
         body = message.get("body") if isinstance(message, dict) else None
         sync_package = (body or {}).get("syncPushPackage") if isinstance(body, dict) else None
@@ -314,21 +424,164 @@ class XianyuAgentBridge(XianyuLive):
             event = extract_chat_event(payload, self.myid)
             if not event:
                 logger.info(
+                    "xianyu sync data shape source={} sample={}",
+                    source,
+                    shape_sample(payload),
+                )
+                logger.info(
+                    "xianyu sync data interesting paths source={} paths={}",
+                    source,
+                    interesting_paths(payload),
+                )
+                logger.info(
                     "xianyu sync data ignored source={} summary={}",
                     source,
                     summarize_payload(payload),
                 )
+                await self.try_fetch_history_from_sync(payload)
                 return
 
             logger.info(
-                "received xianyu message cid={} buyer={}: {}",
+                "received xianyu message cid={} buyer={} preview={}",
                 event["conversation_id"],
                 event["buyer_name"],
-                event["message_text"],
+                preview_text(event["message_text"]),
             )
             asyncio.create_task(self.forward_to_proxy(event))
         except Exception as error:
             logger.exception(f"failed to parse xianyu message: {error}")
+
+    async def try_fetch_history_from_sync(self, payload):
+        for candidate_id in collect_goofish_ids(payload):
+            if candidate_id == str(self.myid):
+                continue
+
+            try:
+                history = await self.list_conversation_history_silent(candidate_id)
+            except Exception as error:
+                logger.warning(
+                    "fetch history failed candidate={} error={}",
+                    masked_string(candidate_id),
+                    error,
+                )
+                continue
+
+            for entry in reversed(history[-5:]):
+                parsed = parse_history_message(entry, self.myid)
+                if not parsed:
+                    continue
+
+                dedupe_key = parsed["message_id"] or f"{candidate_id}:{parsed['buyer_id']}:{parsed['message_text']}"
+                if not self.remember_history_key(dedupe_key):
+                    continue
+
+                event = {
+                    "conversation_id": candidate_id,
+                    "buyer_id": parsed["buyer_id"],
+                    "buyer_name": parsed["buyer_name"],
+                    "message_text": parsed["message_text"],
+                    "raw": {"source": "history_fallback"},
+                }
+                logger.info(
+                    "received xianyu history message cid={} buyer={} message_id={} preview={}",
+                    event["conversation_id"],
+                    event["buyer_name"],
+                    parsed["message_id"],
+                    preview_text(event["message_text"]),
+                )
+                asyncio.create_task(self.forward_to_proxy(event))
+                return
+
+    async def list_conversation_history_silent(self, cid):
+        headers = {
+            "Cookie": get_session_cookies_str(self.xianyu.session),
+            "Host": "wss-goofish.dingtalk.com",
+            "Connection": "Upgrade",
+            "Pragma": "no-cache",
+            "Cache-Control": "no-cache",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "Origin": "https://www.goofish.com",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
+            asyncio.create_task(self.init(websocket))
+            send_mid = generate_mid()
+            request = {
+                "lwp": "/r/MessageManager/listUserMessages",
+                "headers": {
+                    "mid": send_mid
+                },
+                "body": [
+                    f"{cid}@goofish",
+                    False,
+                    9007199254740991,
+                    20,
+                    False
+                ]
+            }
+            history = []
+            async for raw_message in websocket:
+                try:
+                    message = json.loads(raw_message)
+                    await self.ack_message(websocket, message)
+                except Exception:
+                    continue
+
+                if message.get("lwp") == "/s/vulcan":
+                    await websocket.send(json.dumps(request))
+                    continue
+
+                recv_mid = (message.get("headers") or {}).get("mid", "")
+                if recv_mid != send_mid:
+                    continue
+
+                body = message.get("body") or {}
+                user_messages = body.get("userMessageModels") or []
+                has_more = body.get("hasMore") == 1
+                next_cursor = body.get("nextCursor")
+                logger.info(
+                    "fetched xianyu history page cid={} count={} has_more={}",
+                    masked_string(cid),
+                    len(user_messages),
+                    has_more,
+                )
+
+                for user_message in user_messages:
+                    message_model = user_message.get("message") or {}
+                    extension = message_model.get("extension") or {}
+                    custom = ((message_model.get("content") or {}).get("custom") or {})
+                    encoded_data = custom.get("data")
+                    if not encoded_data:
+                        continue
+
+                    try:
+                        decoded = base64.b64decode(encoded_data).decode("utf-8")
+                        content = json.loads(decoded)
+                    except Exception:
+                        content = {
+                            "contentType": custom.get("type"),
+                            "summary": custom.get("summary", ""),
+                        }
+
+                    history.insert(0, {
+                        "send_user_id": extension.get("senderUserId", ""),
+                        "send_user_name": extension.get("reminderTitle", ""),
+                        "message_id": message_model.get("messageId", ""),
+                        "create_at": message_model.get("createAt"),
+                        "message": content,
+                    })
+
+                if has_more and next_cursor:
+                    send_mid = generate_mid()
+                    request["headers"]["mid"] = send_mid
+                    request["body"][2] = next_cursor
+                    await websocket.send(json.dumps(request))
+                    continue
+
+                return history
+
+            return history
 
     async def forward_to_proxy(self, event):
         if not self.proxy_message_url:

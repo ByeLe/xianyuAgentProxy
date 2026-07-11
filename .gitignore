@@ -3,3 +3,5 @@ node_modules/
 .DS_Store
 coverage/
 npm-debug.log*
+__pycache__/
+*.py[cod]
