@@ -14,7 +14,7 @@ from message import make_text
 from utils.goofish_utils import decrypt, generate_mid, get_session_cookies_str
 
 logger.remove()
-logger.add(sys.stderr, diagnose=False)
+logger.add(sys.stderr, diagnose=False, level=os.getenv("LOG_LEVEL", "INFO"))
 
 
 def env_int(name, default):
@@ -201,21 +201,36 @@ class XianyuAgentBridge(XianyuLive):
 
     async def handle_message(self, message, websocket):
         try:
-            data = message["body"]["syncPushPackage"]["data"][0]["data"]
+            data_items = message["body"]["syncPushPackage"]["data"]
         except Exception:
             return
 
+        for item in data_items:
+            data = item.get("data") if isinstance(item, dict) else None
+            if data:
+                await self.handle_sync_data(data)
+
+    async def handle_sync_data(self, data):
         try:
-            json.loads(data)
-            return
+            payload = json.loads(data)
+            source = "plain"
         except Exception:
-            pass
+            try:
+                decrypted = decrypt(data)
+                payload = json.loads(decrypted)
+                source = "encrypted"
+            except Exception as error:
+                logger.exception(f"failed to decrypt xianyu sync data: {error}")
+                return
 
         try:
-            decrypted = decrypt(data)
-            payload = json.loads(decrypted)
             event = extract_chat_event(payload, self.myid)
             if not event:
+                logger.debug(
+                    "xianyu sync data ignored source={} payload_type={}",
+                    source,
+                    type(payload).__name__,
+                )
                 return
 
             logger.info(
