@@ -9,7 +9,7 @@ services:
       PORT: 7892
       XIANYU_SEND_URL: http://xianyu-bridge:7893/xianyu/send
     ports:
-      - "7892:7892"
+      - "${AGENT_PROXY_PORT:-7892}:7892"
     restart: unless-stopped
 
   xianyu-bridge:
@@ -28,7 +28,7 @@ services:
       PROXY_INBOUND_TOKEN: ${XIANYU_INBOUND_TOKEN:-}
       BRIDGE_SEND_TOKEN: ${XIANYU_SEND_TOKEN:-}
     ports:
-      - "7893:7893"
+      - "${XIANYU_BRIDGE_PORT:-7893}:7893"
     depends_on:
       - agent-proxy
     restart: unless-stopped

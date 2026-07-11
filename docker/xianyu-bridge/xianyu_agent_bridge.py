@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import sys
 import threading
 import time
 
@@ -11,6 +12,9 @@ import websockets
 from goofish_live import XianyuLive
 from message import make_text
 from utils.goofish_utils import decrypt, generate_mid, get_session_cookies_str
+
+logger.remove()
+logger.add(sys.stderr, diagnose=False)
 
 
 def env_int(name, default):
