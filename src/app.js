@@ -35,17 +35,8 @@ function normalizeReply(body) {
 
   return {
     correlation_id: String(body.correlation_id),
-    reply_text: replyText,
-    lark_message_id: normalizeLarkMessageId(body)
+    reply_text: replyText
   };
-}
-
-function normalizeLarkMessageId(body) {
-  const value = body.lark_message_id
-    || body.feishu_message_id
-    || body.thread_message_id
-    || body.message_id;
-  return value ? String(value) : '';
 }
 
 function previewText(value, max = 80) {
@@ -98,12 +89,11 @@ function applyErrorMiddleware(app) {
   });
 }
 
-export function createApp({ config, store, postJson = defaultPostJson, feishuClient = null } = {}) {
+export function createApp({ config, store, postJson = defaultPostJson } = {}) {
   const app = new Koa();
   const router = new Router();
   const sessionStore = store || new SessionStore({
-    ttlMs: config.sessionTtlMs,
-    anchorStorePath: config.threadAnchorStorePath
+    ttlMs: config.sessionTtlMs
   });
 
   applyErrorMiddleware(app);
@@ -120,7 +110,6 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
     const input = normalizeInboundMessage(ctx.request.body);
     const session = sessionStore.create(input);
     const topicPayload = buildTopicPayload(session, config);
-    const threadAnchor = sessionStore.getThreadAnchor(session.thread_key);
 
     logInfo('xianyu.message.received', {
       correlation_id: session.correlation_id,
@@ -128,38 +117,9 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
       buyer_id: maskId(session.buyer_id),
       buyer_name: session.buyer_name,
       thread_key: session.thread_key,
-      has_lark_anchor: Boolean(threadAnchor?.lark_message_id),
       message_length: session.message_text.length,
       message_preview: previewText(session.message_text)
     });
-
-    if (threadAnchor?.lark_message_id && feishuClient?.enabled) {
-      const feishuResult = await feishuClient.replyMessage(threadAnchor.lark_message_id, topicPayload.text);
-      const updated = sessionStore.update(session.correlation_id, {
-        status: 'thread_queued',
-        topic_response: feishuResult,
-        lark_anchor_message_id: threadAnchor.lark_message_id
-      });
-
-      ctx.status = 202;
-      ctx.body = {
-        ok: true,
-        correlation_id: updated.correlation_id,
-        status: updated.status,
-        apiproxy_reply_url: topicPayload.apiproxy_reply_url,
-        thread_key: updated.thread_key,
-        lark_anchor_message_id: threadAnchor.lark_message_id,
-        topic: feishuResult
-      };
-
-      logInfo('feishu.thread.reply.queued', {
-        correlation_id: updated.correlation_id,
-        thread_key: updated.thread_key,
-        anchor_message_id: threadAnchor.lark_message_id,
-        feishu_message_id: feishuResult?.data?.message_id || feishuResult?.message_id
-      });
-      return;
-    }
 
     const topicResult = await postJson(config.topicWebhookUrl, topicPayload, {
       timeoutMs: config.requestTimeoutMs
@@ -199,12 +159,9 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
       correlation_id: input.correlation_id,
       conversation_id: session.conversation_id,
       thread_key: session.thread_key,
-      has_lark_message_id: Boolean(input.lark_message_id),
       reply_length: input.reply_text.length,
       reply_preview: previewText(input.reply_text)
     });
-
-    const threadAnchor = rememberLarkAnchor(sessionStore, session, input.lark_message_id);
 
     if (config.mockXianyuSend) {
       const updated = sessionStore.update(input.correlation_id, {
@@ -220,7 +177,6 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
         ok: true,
         correlation_id: updated.correlation_id,
         status: updated.status,
-        lark_anchor_message_id: threadAnchor?.lark_message_id || '',
         xianyu: updated.xianyu_response
       };
       logInfo('xianyu.reply.mock_sent', {
@@ -248,7 +204,6 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
       ok: true,
       correlation_id: updated.correlation_id,
       status: updated.status,
-      lark_anchor_message_id: threadAnchor?.lark_message_id || '',
       xianyu: xianyuResult.body
     };
 
@@ -273,21 +228,4 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
   app.use(router.allowedMethods());
 
   return app;
-}
-
-function rememberLarkAnchor(store, session, larkMessageId) {
-  if (!larkMessageId) return null;
-  const anchor = store.setThreadAnchor(session.thread_key, {
-    lark_message_id: larkMessageId,
-    conversation_id: session.conversation_id,
-    buyer_id: session.buyer_id,
-    buyer_name: session.buyer_name,
-    last_correlation_id: session.correlation_id
-  });
-  logInfo('lark.thread.anchor.saved', {
-    thread_key: anchor.thread_key,
-    lark_message_id: anchor.lark_message_id,
-    last_correlation_id: anchor.last_correlation_id
-  });
-  return anchor;
 }

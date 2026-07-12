@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 
 import { buildConversationKey } from './topic-payload.js';
 
@@ -9,12 +7,9 @@ function nowIso() {
 }
 
 export class SessionStore {
-  constructor({ ttlMs, anchorStorePath = '' }) {
+  constructor({ ttlMs }) {
     this.ttlMs = ttlMs;
-    this.anchorStorePath = anchorStorePath;
     this.sessions = new Map();
-    this.threadAnchors = new Map();
-    this.loadThreadAnchors();
   }
 
   create(input) {
@@ -79,53 +74,5 @@ export class SessionStore {
         this.sessions.delete(correlationId);
       }
     }
-  }
-
-  getThreadAnchor(threadKey) {
-    return this.threadAnchors.get(threadKey) || null;
-  }
-
-  setThreadAnchor(threadKey, patch) {
-    const existing = this.threadAnchors.get(threadKey) || {};
-    const now = nowIso();
-    const anchor = {
-      ...existing,
-      ...patch,
-      thread_key: threadKey,
-      updated_at: now,
-      created_at: existing.created_at || now
-    };
-    this.threadAnchors.set(threadKey, anchor);
-    this.saveThreadAnchors();
-    return anchor;
-  }
-
-  loadThreadAnchors() {
-    if (!this.anchorStorePath || !existsSync(this.anchorStorePath)) return;
-
-    try {
-      const raw = readFileSync(this.anchorStorePath, 'utf8');
-      const data = JSON.parse(raw);
-      for (const anchor of data.anchors || []) {
-        if (anchor.thread_key) {
-          this.threadAnchors.set(anchor.thread_key, anchor);
-        }
-      }
-    } catch {
-      this.threadAnchors.clear();
-    }
-  }
-
-  saveThreadAnchors() {
-    if (!this.anchorStorePath) return;
-
-    mkdirSync(dirname(this.anchorStorePath), { recursive: true });
-    const data = {
-      version: 1,
-      anchors: [...this.threadAnchors.values()]
-    };
-    const tmpPath = `${this.anchorStorePath}.tmp`;
-    writeFileSync(tmpPath, JSON.stringify(data, null, 2));
-    renameSync(tmpPath, this.anchorStorePath);
   }
 }

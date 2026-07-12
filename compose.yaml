@@ -8,11 +8,8 @@ services:
     environment:
       PORT: 7892
       XIANYU_SEND_URL: http://xianyu-bridge:7893/xianyu/send
-      THREAD_ANCHOR_STORE_PATH: /app/work/thread-anchors.json
     ports:
       - "${AGENT_PROXY_PORT:-7892}:7892"
-    volumes:
-      - ./work:/app/work
     restart: unless-stopped
 
   xianyu-bridge:

@@ -8,8 +8,8 @@
 闲鱼买家
   -> Python XianYuApis 常驻 WebSocket 进程
   -> POST /xianyu/message
-  -> 首次：话题群 Webhook
-  -> 后续：飞书消息 reply_in_thread
+  -> 话题群 Webhook（每条消息都会触发）
+  -> botmux 按 thread_key 复用话题并唤醒 agent
   -> Codex CLI / agent
   -> POST /agent/reply
   -> Python XianYuApis /xianyu/send
@@ -18,8 +18,16 @@
 
 两条通道：
 
-- 上行：闲鱼消息进入本服务，本服务投递到话题群。
+- 上行：闲鱼消息进入本服务，本服务每次都投递到话题群 Webhook。
 - 下行：agent 必须调用本服务 `/agent/reply`，本服务再转发给 Python 发信接口。
+
+关键点：本服务不会直接调用飞书 `reply_in_thread`。它只保证同一个闲鱼会话、同一个买家的消息使用完全相同的 `thread_key`：
+
+```text
+xianyu:<conversation_id>:<buyer_id>
+```
+
+话题复用和 agent 唤醒由 botmux/connector 根据这个 `thread_key` 完成。
 
 ## 快速开始
 
@@ -35,7 +43,7 @@ cp .env.example .env
 
 ```env
 AGENT_PROXY_PORT=7894
-PUBLIC_BASE_URL=http://192.168.0.106:7894
+PUBLIC_BASE_URL=http://127.0.0.1:7894
 TOPIC_WEBHOOK_URL=你的咸鱼话题群 Webhook
 XIANYU_COOKIES=你的闲鱼登录 cookie
 ```
@@ -92,7 +100,7 @@ XIANYU_SEND_URL=http://xianyu-bridge:7893/xianyu/send
 PROXY_MESSAGE_URL=http://agent-proxy:7892/xianyu/message
 ```
 
-连起来。`PUBLIC_BASE_URL` 仍然要写成 agent 能访问到的地址，例如你的局域网地址 `http://192.168.0.106:7894`。
+连起来。`PUBLIC_BASE_URL` 仍然要写成 agent 能访问到的地址。botmux/agent 跑在同一台 Mac 上时，推荐使用 `http://127.0.0.1:7894`；如果 agent 跑在别的机器上，再改成那台机器能访问到的局域网地址。
 
 第一次构建 `xianyu-bridge` 镜像时，会拉取 `cv-cat/XianYuApis` 并安装 Python/Node 依赖，所以会慢一点。
 
@@ -157,13 +165,7 @@ content-type: application/json
 }
 ```
 
-如果这个 `thread_key` 已经保存过飞书消息锚点，本服务不会再调用话题群 Webhook，而是调用飞书接口：
-
-```http
-POST https://open.feishu.cn/open-apis/im/v1/messages/:message_id/reply
-```
-
-请求里会带 `reply_in_thread: true`，让后续同一买家的消息进入原飞书话题。
+每次收到闲鱼消息，本服务都会把 payload POST 到 `TOPIC_WEBHOOK_URL`。同一个 `conversation_id + buyer_id` 会生成相同的 `thread_key`，让 botmux 命中已有话题，并在该话题里触发新一轮 agent 处理。
 
 ### agent 回写
 
@@ -177,8 +179,7 @@ content-type: application/json
 ```json
 {
   "correlation_id": "xy_...",
-  "reply_text": "最终要发给买家的中文回复",
-  "lark_message_id": "当前飞书话题内可被 reply 的消息 ID"
+  "reply_text": "最终要发给买家的中文回复"
 }
 ```
 
@@ -193,14 +194,6 @@ content-type: application/json
   "reply_text": "最终回复"
 }
 ```
-
-`lark_message_id` 可选，但建议让 agent 每次都带上。服务会按：
-
-```text
-xianyu:<conversation_id>:<buyer_id>
-```
-
-保存这条飞书消息 ID。下一次同一个闲鱼会话、同一个买家的消息到来时，就直接回复到这条飞书消息所在的话题。
 
 ### 查询会话状态
 
@@ -220,8 +213,7 @@ GET /sessions/:correlation_id
 调用 JSON：
 {
   "correlation_id": "<收到的 correlation_id>",
-  "reply_text": "<最终要发给买家的中文回复>",
-  "lark_message_id": "<当前飞书消息 ID，用于后续 reply_in_thread>"
+  "reply_text": "<最终要发给买家的中文回复>"
 }
 ```
 
@@ -232,11 +224,9 @@ GET /sessions/:correlation_id
 - `XIANYU_INBOUND_TOKEN`：开启后，Python 调 `/xianyu/message` 必须带 `Authorization: Bearer <token>`。
 - `XIANYU_SEND_TOKEN`：开启后，Node 调 Python `/xianyu/send` 必须带 `Authorization: Bearer <token>`。
 - `AGENT_REPLY_TOKEN`：开启后，agent 调 `/agent/reply` 必须带 `Authorization: Bearer <token>`。
-- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：开启后，已有飞书锚点的闲鱼消息会通过飞书 reply 接口进入原话题。
-- `THREAD_ANCHOR_STORE_PATH`：飞书锚点落盘文件，Docker Compose 默认写到 `/app/work/thread-anchors.json`。
 
 如果设置了 `AGENT_REPLY_TOKEN`，本服务会把 `apiproxy_reply_token` 一并投递到话题群 payload，方便 agent 回写。
 
 ## 后续建议
 
-当前版本 `correlation_id` 会话状态保存在内存里，适合先跑通闭环；飞书话题锚点会按 `THREAD_ANCHOR_STORE_PATH` 落盘。生产使用时建议把 `SessionStore` 换成 Redis，这样服务重启后不会丢失尚未回写的 `correlation_id`。
+当前版本 `correlation_id` 会话状态保存在内存里，适合先跑通闭环。生产使用时建议把 `SessionStore` 换成 Redis，这样服务重启后不会丢失尚未回写的 `correlation_id`。
