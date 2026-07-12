@@ -14,6 +14,7 @@ export class SessionStore {
     this.anchorStorePath = anchorStorePath;
     this.sessions = new Map();
     this.threadAnchors = new Map();
+    this.larkMessageIndex = new Map();
     this.loadThreadAnchors();
   }
 
@@ -39,7 +40,8 @@ export class SessionStore {
       raw: input.raw || null,
       topic_response: null,
       xianyu_response: null,
-      reply_text: ''
+      reply_text: '',
+      lark_message_ids: []
     };
 
     this.sessions.set(correlationId, session);
@@ -72,11 +74,37 @@ export class SessionStore {
     return updated;
   }
 
+  recordLarkMessage(correlationId, larkMessageId) {
+    const messageId = String(larkMessageId || '').trim();
+    if (!messageId) return null;
+
+    const session = this.get(correlationId);
+    if (!session) return null;
+
+    this.larkMessageIndex.set(messageId, correlationId);
+    const existing = new Set(session.lark_message_ids || []);
+    existing.add(messageId);
+    return this.update(correlationId, {
+      lark_message_ids: [...existing]
+    });
+  }
+
+  getByLarkMessageId(larkMessageId) {
+    const correlationId = this.larkMessageIndex.get(String(larkMessageId || '').trim());
+    if (!correlationId) return null;
+    return this.get(correlationId);
+  }
+
   cleanupExpired() {
     const now = Date.now();
     for (const [correlationId, session] of this.sessions.entries()) {
       if (Date.parse(session.expires_at) <= now) {
         this.sessions.delete(correlationId);
+      }
+    }
+    for (const [larkMessageId, correlationId] of this.larkMessageIndex.entries()) {
+      if (!this.sessions.has(correlationId)) {
+        this.larkMessageIndex.delete(larkMessageId);
       }
     }
   }

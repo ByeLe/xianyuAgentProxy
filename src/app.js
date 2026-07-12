@@ -29,14 +29,16 @@ function normalizeInboundMessage(body) {
 
 function normalizeReply(body) {
   assertHttp(body && typeof body === 'object', 400, '请求体必须是 JSON 对象');
-  assertHttp(body.correlation_id, 400, '缺少 correlation_id');
+  const correlationId = body.correlation_id ? String(body.correlation_id) : '';
+  const larkMessageId = normalizeLarkMessageId(body);
+  assertHttp(correlationId || larkMessageId, 400, '缺少 correlation_id 或 lark_message_id');
   const replyText = String(body.reply_text || '').trim();
   assertHttp(replyText, 400, '缺少 reply_text');
 
   return {
-    correlation_id: String(body.correlation_id),
+    correlation_id: correlationId,
     reply_text: replyText,
-    lark_message_id: normalizeLarkMessageId(body)
+    lark_message_id: larkMessageId
   };
 }
 
@@ -66,6 +68,10 @@ function logInfo(event, details = {}) {
     event,
     ...details
   }));
+}
+
+function extractFeishuMessageId(result) {
+  return result?.data?.message_id || result?.message_id || '';
 }
 
 function buildXianyuSendPayload(session, replyText) {
@@ -141,6 +147,8 @@ export function createApp({
 
     if (threadAnchor?.lark_message_id && feishuClient?.enabled) {
       const feishuResult = await feishuClient.replyMessage(threadAnchor.lark_message_id, topicPayload.text);
+      const feishuMessageId = extractFeishuMessageId(feishuResult);
+      sessionStore.recordLarkMessage(session.correlation_id, feishuMessageId);
       const updated = sessionStore.update(session.correlation_id, {
         status: 'thread_queued',
         topic_response: feishuResult,
@@ -162,7 +170,7 @@ export function createApp({
         correlation_id: updated.correlation_id,
         thread_key: updated.thread_key,
         anchor_message_id: threadAnchor.lark_message_id,
-        feishu_message_id: feishuResult?.data?.message_id || feishuResult?.message_id
+        feishu_message_id: feishuMessageId
       });
       return;
     }
@@ -181,6 +189,8 @@ export function createApp({
 
     if (threadAnchorFromBotmux?.lark_message_id && feishuClient?.enabled) {
       const feishuResult = await feishuClient.replyMessage(threadAnchorFromBotmux.lark_message_id, topicPayload.text);
+      const feishuMessageId = extractFeishuMessageId(feishuResult);
+      sessionStore.recordLarkMessage(session.correlation_id, feishuMessageId);
       const updated = sessionStore.update(session.correlation_id, {
         status: 'thread_queued',
         topic_response: feishuResult,
@@ -213,7 +223,7 @@ export function createApp({
         correlation_id: updated.correlation_id,
         thread_key: updated.thread_key,
         anchor_message_id: threadAnchorFromBotmux.lark_message_id,
-        feishu_message_id: feishuResult?.data?.message_id || feishuResult?.message_id
+        feishu_message_id: feishuMessageId
       });
       return;
     }
@@ -249,11 +259,13 @@ export function createApp({
 
   router.post('/agent/reply', requireOptionalBearer(config.agentReplyToken), async (ctx) => {
     const input = normalizeReply(ctx.request.body);
-    const session = sessionStore.get(input.correlation_id);
-    assertHttp(session, 404, '找不到 correlation_id 对应的闲鱼会话');
+    const session = input.correlation_id
+      ? sessionStore.get(input.correlation_id)
+      : sessionStore.getByLarkMessageId(input.lark_message_id);
+    assertHttp(session, 404, '找不到 correlation_id 或 lark_message_id 对应的闲鱼会话');
 
     logInfo('agent.reply.received', {
-      correlation_id: input.correlation_id,
+      correlation_id: session.correlation_id,
       conversation_id: session.conversation_id,
       thread_key: session.thread_key,
       has_lark_message_id: Boolean(input.lark_message_id),
@@ -264,7 +276,7 @@ export function createApp({
     const threadAnchor = rememberLarkAnchor(sessionStore, session, input.lark_message_id);
 
     if (config.mockXianyuSend) {
-      const updated = sessionStore.update(input.correlation_id, {
+      const updated = sessionStore.update(session.correlation_id, {
         status: 'mock_sent',
         reply_text: input.reply_text,
         xianyu_response: {
@@ -295,7 +307,7 @@ export function createApp({
       headers: sendHeaders
     });
 
-    const updated = sessionStore.update(input.correlation_id, {
+    const updated = sessionStore.update(session.correlation_id, {
       status: 'sent',
       reply_text: input.reply_text,
       xianyu_response: xianyuResult.body
