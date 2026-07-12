@@ -32,17 +32,41 @@ function parseAvailableBots(text) {
   return bots;
 }
 
+function sessionSearchText(session) {
+  return [
+    session?.title,
+    session?.currentTurnTitle,
+    session?.lastUserPrompt,
+    session?.lastCliInput
+  ].filter(Boolean).join('\n');
+}
+
+function normalizeSessionRecord(id, session, searchableText = sessionSearchText(session)) {
+  return {
+    sessionId: String(session?.sessionId || id),
+    rootMessageId: session?.rootMessageId || '',
+    chatId: session?.chatId || '',
+    title: session?.title || '',
+    createdAt: session?.createdAt || '',
+    lastMessageAt: session?.lastMessageAt || '',
+    agentFrozen: Boolean(session?.agentFrozen),
+    availableBots: parseAvailableBots(searchableText)
+  };
+}
+
 export class BotmuxClient {
   constructor({
     command = 'botmux',
     timeoutMs = 15000,
     relaySessionsPath = '',
+    targetSessionsPath = '',
     env = process.env,
     execFileImpl = execFileAsync
   } = {}) {
     this.command = command;
     this.timeoutMs = timeoutMs;
     this.relaySessionsPath = relaySessionsPath;
+    this.targetSessionsPath = targetSessionsPath;
     this.env = env;
     this.execFile = execFileImpl;
   }
@@ -103,16 +127,28 @@ export class BotmuxClient {
     };
   }
 
-  async findRelaySession({ conversationKey, excludeSessionIds = [] }) {
-    if (!this.relaySessionsPath || !conversationKey) return null;
-
+  async readSessionFile(sessionsPath) {
     let data;
     try {
-      const raw = await readFile(this.relaySessionsPath, 'utf8');
+      const raw = await readFile(sessionsPath, 'utf8');
       data = JSON.parse(raw);
     } catch {
       return null;
     }
+
+    return data && typeof data === 'object' ? data : null;
+  }
+
+  async findSessionInFile({
+    sessionsPath,
+    conversationKey,
+    excludeSessionIds = [],
+    notBeforeMs = 0
+  }) {
+    if (!sessionsPath || !conversationKey) return null;
+
+    const data = await this.readSessionFile(sessionsPath);
+    if (!data) return null;
 
     const excluded = new Set(excludeSessionIds.filter(Boolean).map(String));
     const marker = `conversation_key: ${conversationKey}`;
@@ -121,15 +157,11 @@ export class BotmuxClient {
         id,
         session,
         sessionId: String(session?.sessionId || id),
-        searchableText: [
-          session?.title,
-          session?.currentTurnTitle,
-          session?.lastUserPrompt,
-          session?.lastCliInput
-        ].filter(Boolean).join('\n')
+        searchableText: sessionSearchText(session)
       }))
       .filter(({ session, sessionId, searchableText }) => {
         if (!session || excluded.has(sessionId)) return false;
+        if (notBeforeMs && sessionTime(session) < notBeforeMs) return false;
         return searchableText.includes(marker);
       })
       .sort((a, b) => sessionTime(b.session) - sessionTime(a.session));
@@ -137,27 +169,83 @@ export class BotmuxClient {
     const found = matches[0];
     if (!found) return null;
 
-    return {
-      sessionId: found.sessionId,
-      rootMessageId: found.session.rootMessageId || '',
-      chatId: found.session.chatId || '',
-      title: found.session.title || '',
-      createdAt: found.session.createdAt || '',
-      lastMessageAt: found.session.lastMessageAt || '',
-      availableBots: parseAvailableBots(found.searchableText)
-    };
+    return normalizeSessionRecord(found.id, found.session, found.searchableText);
+  }
+
+  async findSessionById({ sessionsPath, sessionId }) {
+    if (!sessionsPath || !sessionId) return null;
+
+    const data = await this.readSessionFile(sessionsPath);
+    if (!data) return null;
+
+    const expected = String(sessionId);
+    const match = Object.entries(data).find(([id, session]) => {
+      return String(id) === expected || String(session?.sessionId || '') === expected;
+    });
+    if (!match) return null;
+
+    const [id, session] = match;
+    return normalizeSessionRecord(id, session);
+  }
+
+  async findRelaySession({ conversationKey, excludeSessionIds = [], notBeforeMs = 0 }) {
+    return this.findSessionInFile({
+      sessionsPath: this.relaySessionsPath,
+      conversationKey,
+      excludeSessionIds,
+      notBeforeMs
+    });
+  }
+
+  async findTargetSession({ conversationKey, excludeSessionIds = [], notBeforeMs = 0 }) {
+    return this.findSessionInFile({
+      sessionsPath: this.targetSessionsPath,
+      conversationKey,
+      excludeSessionIds,
+      notBeforeMs
+    });
+  }
+
+  async findTargetSessionById(sessionId) {
+    return this.findSessionById({
+      sessionsPath: this.targetSessionsPath,
+      sessionId
+    });
   }
 
   async waitForRelaySession({
     conversationKey,
     excludeSessionIds = [],
+    notBeforeMs = 0,
     timeoutMs = 5000,
     intervalMs = 250
   }) {
+    return this.waitForSession({
+      find: () => this.findRelaySession({ conversationKey, excludeSessionIds, notBeforeMs }),
+      timeoutMs,
+      intervalMs
+    });
+  }
+
+  async waitForTargetSession({
+    conversationKey,
+    excludeSessionIds = [],
+    notBeforeMs = 0,
+    timeoutMs = 5000,
+    intervalMs = 250
+  }) {
+    return this.waitForSession({
+      find: () => this.findTargetSession({ conversationKey, excludeSessionIds, notBeforeMs }),
+      timeoutMs,
+      intervalMs
+    });
+  }
+
+  async waitForSession({ find, timeoutMs = 5000, intervalMs = 250 }) {
     const startedAt = Date.now();
 
     do {
-      const found = await this.findRelaySession({ conversationKey, excludeSessionIds });
+      const found = await find();
       if (found) return found;
 
       if (Date.now() - startedAt >= timeoutMs) break;

@@ -31,8 +31,11 @@ export function loadConfig(env = process.env) {
   const botmuxTargetMention = env.BOTMUX_TARGET_MENTION || '';
   const botmuxDataDir = env.BOTMUX_DATA_DIR || '';
   const botmuxRelayAppId = env.BOTMUX_RELAY_APP_ID || '';
+  const botmuxTargetAppId = env.BOTMUX_TARGET_APP_ID || '';
   const botmuxRelaySessionsPath = env.BOTMUX_RELAY_SESSIONS_PATH
     || (botmuxDataDir && botmuxRelayAppId ? join(botmuxDataDir, `sessions-${botmuxRelayAppId}.json`) : '');
+  const botmuxTargetSessionsPath = env.BOTMUX_TARGET_SESSIONS_PATH
+    || (botmuxDataDir && botmuxTargetAppId ? join(botmuxDataDir, `sessions-${botmuxTargetAppId}.json`) : '');
 
   return {
     port,
@@ -50,7 +53,9 @@ export function loadConfig(env = process.env) {
     botmuxRelayLookupIntervalMs: numberFromEnv(env.BOTMUX_RELAY_LOOKUP_INTERVAL_MS, 250),
     botmuxDataDir,
     botmuxRelayAppId,
+    botmuxTargetAppId,
     botmuxRelaySessionsPath,
+    botmuxTargetSessionsPath,
     botmuxRelayMention: env.BOTMUX_RELAY_MENTION || '',
     botmuxTargetMention,
     botmuxTargetName: env.BOTMUX_TARGET_NAME || mentionName(botmuxTargetMention),

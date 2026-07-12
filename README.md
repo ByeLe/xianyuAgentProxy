@@ -27,7 +27,7 @@
 xianyu:<conversation_id>:<buyer_id>
 ```
 
-首条消息投递 webhook 时会带 `x-botmux-async: 1`，保存 botmux 返回的哈喽哈 `target_session_id`，然后在该 session 中 @ 用户的嘴替，初始化同话题 relay session。
+首条消息投递 webhook 时必须使用普通模式：不要带 `?async=1`，也不要带 `x-botmux-async: 1`。服务会保存或反查哈喽哈 `target_session_id`，然后在该 session 中 @ 用户的嘴替，初始化同话题 relay session。
 
 后续同一业务键的消息不再走 webhook，而是执行：
 
@@ -69,15 +69,18 @@ BOTMUX_TARGET_MENTION=哈喽哈的open_id:哈喽哈
 BOTMUX_TARGET_NAME=哈喽哈
 BOTMUX_DATA_DIR=/Users/你的用户名/.botmux/data
 BOTMUX_RELAY_APP_ID=cli_aad9ffdebbf8dbc9
+BOTMUX_TARGET_APP_ID=cli_aac257edf8b8dbed
 ```
 
-初始化 relay 时，`botmux send` 有时只返回发送方 session。此时服务会读取 `BOTMUX_DATA_DIR/sessions-${BOTMUX_RELAY_APP_ID}.json`，按 `conversation_key` 找到“用户的嘴替”在原话题里的 session。如果不想用 `BOTMUX_DATA_DIR` + `BOTMUX_RELAY_APP_ID` 组合，也可以直接配置 `BOTMUX_RELAY_SESSIONS_PATH`。
+首条普通 webhook 有时不直接返回哈喽哈 session id。此时服务会读取 `BOTMUX_DATA_DIR/sessions-${BOTMUX_TARGET_APP_ID}.json`，按 `conversation_key` 找到哈喽哈 session。初始化 relay 时，`botmux send` 有时只返回发送方 session。此时服务会读取 `BOTMUX_DATA_DIR/sessions-${BOTMUX_RELAY_APP_ID}.json`，按 `conversation_key` 找到“用户的嘴替”在原话题里的 session。如果不想用 `BOTMUX_DATA_DIR` + app id 组合，也可以直接配置 `BOTMUX_TARGET_SESSIONS_PATH` 和 `BOTMUX_RELAY_SESSIONS_PATH`。
 
 不同机器人视角下，同一个 bot 的 open_id 可能不同。服务会优先从“用户的嘴替”session 的 `available_bots` 中按 `BOTMUX_TARGET_NAME` 找到哈喽哈的实际 mention；`BOTMUX_TARGET_MENTION` 只是兜底值。
 
+后续消息能否真正写入哈喽哈 PTY，还取决于哈喽哈侧的 botmux talk 权限。`botmux send --mention` 成功只代表消息已发到话题并 @ 到哈喽哈；哈喽哈 daemon 还会在 `enforceMessageQuotaForCliInput()` 里调用 `evaluateTalk()` 复查发送方。如果“用户的嘴替”没有被哈喽哈在该群 `/grant`，日志会停在 `Bot-to-bot @mention detected` / `Reply in thread-scope session`，但不会出现 `Writing to PTY`。
+
 注意：Docker 容器默认没有宿主机的 `botmux` CLI，也读不到宿主机的 `~/.botmux/data`。启用 relay 方案时，建议先在宿主机直接运行 Node 服务测试，或给容器提供可用的 botmux CLI 与会话文件挂载。
 
-当前真实验证结论：本服务可以完成首条 webhook、初始化“用户的嘴替”relay session，并在后续消息中通过 relay session 把消息发回原话题且 @ 哈喽哈。若 botmux daemon 日志只出现 `Bot-to-bot @mention detected` / `Reply in thread-scope session`，但没有 `Writing to PTY`，说明 botmux v2.102.0 的 existing-thread bot-to-bot 分支没有继续派发到 Codex worker；这时需要修 botmux connector，或改用 `x-botmux-session-id` webhook 方案作为唤醒兜底。
+当前真实验证结论：本服务可以完成首条 webhook、初始化“用户的嘴替”relay session，并在后续消息中通过 relay session 把消息发回原话题且 @ 哈喽哈。注意不要把两套模式混用：`async=1 + sessionId` 是一套模式，普通 webhook + 嘴替 @ 是另一套模式。本服务采用后一套。`agentFrozen` 在 botmux v2.102.0 中是 agent 启动配置快照标记，不应作为是否可续聊的判断；真正需要避开的是 async 模式注入的 `<botmux_http_response_mode>` / `options.asyncReturnSessionId`。
 
 如果话题群 Webhook 服务就跑在同一台 Mac 上，Docker 容器里访问宿主机一般不要用局域网 IP，而是把 Webhook URL 的主机名写成 `host.docker.internal`，例如：
 
@@ -198,7 +201,7 @@ content-type: application/json
 }
 ```
 
-首条消息会把 payload POST 到 `TOPIC_WEBHOOK_URL`，保存 `target_session_id`，并尝试初始化 `relay_session_id`。后续消息如果已有 `relay_session_id`，会通过 `botmux send --mention` 唤醒哈喽哈。若 relay session 失效，会用 `target_session_id` 重新初始化并重试当前消息。
+首条消息会把 payload POST 到 `TOPIC_WEBHOOK_URL`，不会携带 async header。服务会保存或从哈喽哈 session 文件反查 `target_session_id`，并尝试初始化 `relay_session_id`。后续消息如果已有 `relay_session_id`，会通过 `botmux send --mention` 唤醒哈喽哈。若 relay session 失效，会用 `target_session_id` 重新初始化并重试当前消息。
 
 ### agent 回写
 
@@ -263,7 +266,9 @@ GET /sessions/:correlation_id
 - `BOTMUX_RELAY_LOOKUP_TIMEOUT_MS`：初始化 relay 后等待本地 botmux 会话文件出现的最长时间。
 - `BOTMUX_DATA_DIR`：botmux 本地数据目录，常见值为 `~/.botmux/data`。
 - `BOTMUX_RELAY_APP_ID`：中转机器人“用户的嘴替”的 app id，用来拼出 `sessions-<appId>.json`。
+- `BOTMUX_TARGET_APP_ID`：目标机器人“哈喽哈”的 app id，用来拼出 `sessions-<appId>.json`。
 - `BOTMUX_RELAY_SESSIONS_PATH`：可选，直接指定“用户的嘴替”会话文件路径，会覆盖 `BOTMUX_DATA_DIR` + `BOTMUX_RELAY_APP_ID`。
+- `BOTMUX_TARGET_SESSIONS_PATH`：可选，直接指定“哈喽哈”会话文件路径，会覆盖 `BOTMUX_DATA_DIR` + `BOTMUX_TARGET_APP_ID`。
 - `BOTMUX_RELAY_MENTION`：初始化 relay 时 @ 用户的嘴替，格式 `open_id:名称`。
 - `BOTMUX_TARGET_MENTION`：后续消息唤醒哈喽哈，格式 `open_id:名称`。
 - `BOTMUX_TARGET_NAME`：目标机器人名称，默认从 `BOTMUX_TARGET_MENTION` 冒号后提取；用于从 relay session 的 `available_bots` 里解析正确 open_id。

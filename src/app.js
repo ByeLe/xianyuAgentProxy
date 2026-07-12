@@ -69,12 +69,6 @@ function buildXianyuSendPayload(session, replyText) {
   };
 }
 
-function buildTopicHeaders() {
-  return {
-    'x-botmux-async': '1'
-  };
-}
-
 function extractBotmuxSessionId(topicBody) {
   const value = topicBody?.target?.sessionId || topicBody?.sessionId;
   return value ? String(value) : '';
@@ -108,6 +102,7 @@ async function resolveRelaySessionInfo({ config, botmuxClient, session, targetSe
   const found = await botmuxClient.waitForRelaySession?.({
     conversationKey: session.thread_key,
     excludeSessionIds: [targetSessionId],
+    notBeforeMs: sendResult?.notBeforeMs || 0,
     timeoutMs: config.botmuxRelayLookupTimeoutMs,
     intervalMs: config.botmuxRelayLookupIntervalMs
   });
@@ -118,6 +113,32 @@ async function resolveRelaySessionInfo({ config, botmuxClient, session, targetSe
     ...found,
     targetMention: resolveTargetMentionFromRelay(found, config),
     source: 'session_store'
+  };
+}
+
+async function resolveTargetSessionInfo({ config, botmuxClient, session, topicResult, notBeforeMs = 0 }) {
+  const returnedSessionId = extractBotmuxSessionId(topicResult.body);
+  if (returnedSessionId) {
+    const found = await botmuxClient?.findTargetSessionById?.(returnedSessionId);
+    return {
+      ...found,
+      sessionId: returnedSessionId,
+      source: 'webhook_response',
+      agentFrozen: Boolean(found?.agentFrozen)
+    };
+  }
+
+  const found = await botmuxClient?.waitForTargetSession?.({
+    conversationKey: session.thread_key,
+    notBeforeMs,
+    timeoutMs: config.botmuxRelayLookupTimeoutMs,
+    intervalMs: config.botmuxRelayLookupIntervalMs
+  });
+  if (!found?.sessionId) return null;
+
+  return {
+    ...found,
+    source: 'target_session_store'
   };
 }
 
@@ -169,8 +190,7 @@ function requireRelayConfig(config, botmuxClient) {
 
 async function triggerFirstWebhook({ config, postJson, session, topicPayload }) {
   return postJson(config.topicWebhookUrl, topicPayload, {
-    timeoutMs: config.requestTimeoutMs,
-    headers: buildTopicHeaders()
+    timeoutMs: config.requestTimeoutMs
   });
 }
 
@@ -182,11 +202,14 @@ async function initializeRelaySession({ config, botmuxClient, sessionStore, sess
     throw createRelayError('缺少 target_session_id，无法初始化 relay session');
   }
 
+  const relayStartedAt = Date.now();
   const result = await botmuxClient.sendMention({
     sessionId: targetSessionId,
     mention: config.botmuxRelayMention,
     message: buildRelayInitMessage(session)
   });
+  result.notBeforeMs = Math.max(0, relayStartedAt - 1000);
+
   const relaySessionInfo = await resolveRelaySessionInfo({
     config,
     botmuxClient,
@@ -201,6 +224,8 @@ async function initializeRelaySession({ config, botmuxClient, sessionStore, sess
   const conversationSession = sessionStore.setConversationSession(session.thread_key, {
     ...mapping,
     target_session_id: targetSessionId,
+    target_session_source: mapping?.target_session_source || '',
+    target_agent_frozen: Boolean(mapping?.target_agent_frozen),
     relay_session_id: relaySessionInfo.sessionId,
     thread_root_id: relaySessionInfo.rootMessageId || mapping?.thread_root_id || '',
     relay_session_source: relaySessionInfo.source,
@@ -275,7 +300,7 @@ export function createApp({ config, store, postJson = defaultPostJson, botmuxCli
     const input = normalizeInboundMessage(ctx.request.body);
     const session = sessionStore.create(input);
     const topicPayload = buildTopicPayload(session, config);
-    const conversationSession = sessionStore.getConversationSession(session.thread_key);
+    let conversationSession = sessionStore.getConversationSession(session.thread_key);
 
     logInfo('xianyu.message.received', {
       correlation_id: session.correlation_id,
@@ -355,13 +380,21 @@ export function createApp({ config, store, postJson = defaultPostJson, botmuxCli
       return;
     }
 
+    const webhookStartedAt = Date.now();
     const topicResult = await triggerFirstWebhook({
       config,
       postJson,
       session,
       topicPayload
     });
-    const targetSessionId = extractBotmuxSessionId(topicResult.body);
+    const targetSessionInfo = await resolveTargetSessionInfo({
+      config,
+      botmuxClient,
+      session,
+      topicResult,
+      notBeforeMs: Math.max(0, webhookStartedAt - 1000)
+    });
+    const targetSessionId = targetSessionInfo?.sessionId || '';
     let relaySession = null;
     let relayInitError = null;
 
@@ -369,6 +402,8 @@ export function createApp({ config, store, postJson = defaultPostJson, botmuxCli
       const targetSession = sessionStore.setConversationSession(session.thread_key, {
         ...conversationSession,
         target_session_id: targetSessionId,
+        target_session_source: targetSessionInfo.source,
+        target_agent_frozen: Boolean(targetSessionInfo.agentFrozen),
         conversation_id: session.conversation_id,
         buyer_id: session.buyer_id,
         buyer_name: session.buyer_name,
@@ -395,12 +430,20 @@ export function createApp({ config, store, postJson = defaultPostJson, botmuxCli
           });
         }
       }
+    } else if (botmuxClient?.enabled && config.botmuxRelayMention && config.botmuxTargetMention) {
+      relayInitError = '未能定位哈喽哈 target_session_id，无法初始化 relay session';
+      logInfo('botmux.target_session.lookup_failed', {
+        correlation_id: session.correlation_id,
+        thread_key: session.thread_key
+      });
     }
 
     const updated = sessionStore.update(session.correlation_id, {
       status: 'queued',
       topic_response: topicResult.body,
       target_session_id: targetSessionId,
+      target_session_source: targetSessionInfo?.source || '',
+      target_agent_frozen: Boolean(targetSessionInfo?.agentFrozen),
       relay_session_id: relaySession?.relay_session_id || '',
       relay_init_error: relayInitError
     });
@@ -413,6 +456,8 @@ export function createApp({ config, store, postJson = defaultPostJson, botmuxCli
       apiproxy_reply_url: topicPayload.apiproxy_reply_url,
       thread_key: updated.thread_key,
       target_session_id: targetSessionId,
+      target_session_source: targetSessionInfo?.source || '',
+      target_agent_frozen: Boolean(targetSessionInfo?.agentFrozen),
       relay_session_id: relaySession?.relay_session_id || '',
       relay_ready: Boolean(relaySession?.relay_session_id),
       relay_init_error: relayInitError,
@@ -426,6 +471,8 @@ export function createApp({ config, store, postJson = defaultPostJson, botmuxCli
       trigger_id: topicResult.body?.triggerId,
       session_id: topicResult.body?.target?.sessionId,
       target_session_id: targetSessionId,
+      target_session_source: targetSessionInfo?.source || '',
+      target_agent_frozen: Boolean(targetSessionInfo?.agentFrozen),
       relay_session_id: relaySession?.relay_session_id || '',
       chat_id: topicResult.body?.target?.chatId
     });

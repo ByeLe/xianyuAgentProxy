@@ -7,7 +7,8 @@ const botmuxClient = config.botmuxRelayEnabled
   ? new BotmuxClient({
     command: config.botmuxCommand,
     timeoutMs: config.botmuxSendTimeoutMs,
-    relaySessionsPath: config.botmuxRelaySessionsPath
+    relaySessionsPath: config.botmuxRelaySessionsPath,
+    targetSessionsPath: config.botmuxTargetSessionsPath
   })
   : null;
 const app = createApp({ config, botmuxClient });
