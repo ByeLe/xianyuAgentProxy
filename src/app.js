@@ -204,6 +204,8 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
       reply_preview: previewText(input.reply_text)
     });
 
+    const threadAnchor = rememberLarkAnchor(sessionStore, session, input.lark_message_id);
+
     if (config.mockXianyuSend) {
       const updated = sessionStore.update(input.correlation_id, {
         status: 'mock_sent',
@@ -213,12 +215,12 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
           mocked: true
         }
       });
-      rememberLarkAnchor(sessionStore, updated, input.lark_message_id);
 
       ctx.body = {
         ok: true,
         correlation_id: updated.correlation_id,
         status: updated.status,
+        lark_anchor_message_id: threadAnchor?.lark_message_id || '',
         xianyu: updated.xianyu_response
       };
       logInfo('xianyu.reply.mock_sent', {
@@ -241,12 +243,12 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
       reply_text: input.reply_text,
       xianyu_response: xianyuResult.body
     });
-    rememberLarkAnchor(sessionStore, updated, input.lark_message_id);
 
     ctx.body = {
       ok: true,
       correlation_id: updated.correlation_id,
       status: updated.status,
+      lark_anchor_message_id: threadAnchor?.lark_message_id || '',
       xianyu: xianyuResult.body
     };
 

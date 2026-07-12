@@ -34,9 +34,16 @@ cp .env.example .env
 编辑 `.env`，至少填这几项：
 
 ```env
-PUBLIC_BASE_URL=http://192.168.0.106:7892
+AGENT_PROXY_PORT=7894
+PUBLIC_BASE_URL=http://192.168.0.106:7894
 TOPIC_WEBHOOK_URL=你的咸鱼话题群 Webhook
 XIANYU_COOKIES=你的闲鱼登录 cookie
+```
+
+如果话题群 Webhook 服务就跑在同一台 Mac 上，Docker 容器里访问宿主机一般不要用局域网 IP，而是把 Webhook URL 的主机名写成 `host.docker.internal`，例如：
+
+```env
+TOPIC_WEBHOOK_URL=http://host.docker.internal:7891/webhook/xxx/yyy
 ```
 
 然后启动：
@@ -66,13 +73,13 @@ docker compose down
 
 两个服务的端口：
 
-- Node apiproxy：http://127.0.0.1:7892
+- Node apiproxy：http://127.0.0.1:7894
 - Python 闲鱼桥接：http://127.0.0.1:7893
 
 健康检查：
 
 ```bash
-curl http://127.0.0.1:7892/health
+curl http://127.0.0.1:7894/health
 curl http://127.0.0.1:7893/health
 ```
 
@@ -85,7 +92,7 @@ XIANYU_SEND_URL=http://xianyu-bridge:7893/xianyu/send
 PROXY_MESSAGE_URL=http://agent-proxy:7892/xianyu/message
 ```
 
-连起来。`PUBLIC_BASE_URL` 仍然要写成 agent 能访问到的地址，例如你的局域网地址 `http://192.168.0.106:7892`。
+连起来。`PUBLIC_BASE_URL` 仍然要写成 agent 能访问到的地址，例如你的局域网地址 `http://192.168.0.106:7894`。
 
 第一次构建 `xianyu-bridge` 镜像时，会拉取 `cv-cat/XianYuApis` 并安装 Python/Node 依赖，所以会慢一点。
 

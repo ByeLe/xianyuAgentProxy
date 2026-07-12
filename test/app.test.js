@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { createApp } from '../src/app.js';
+import { HttpError } from '../src/errors.js';
 import { SessionStore } from '../src/session-store.js';
 
 function listen(app) {
   return new Promise((resolve) => {
-    const server = app.listen(0, () => {
+    const server = app.listen(0, '127.0.0.1', () => {
       const { port } = server.address();
       resolve({
         server,
@@ -193,6 +194,51 @@ test('agent 回写会转发到闲鱼发送接口', async () => {
     assert.equal(calls[0].payload.text, '在的，可以拍。');
     assert.equal(calls[0].options.headers.Authorization, 'Bearer send-secret');
     assert.equal(store.getThreadAnchor('xianyu:cid_1:buyer_1').lark_message_id, 'om_anchor');
+  } finally {
+    server.close();
+  }
+});
+
+test('agent 回写带飞书消息 ID 时，会先记录话题锚点', async () => {
+  const config = {
+    publicBaseUrl: 'http://proxy.local',
+    topicWebhookUrl: 'http://topic.local/webhook',
+    xianyuSendUrl: 'http://xianyu.local/send',
+    xianyuSendToken: '',
+    xianyuInboundToken: '',
+    agentReplyToken: '',
+    requestTimeoutMs: 1000,
+    sessionTtlMs: 60000,
+    threadAnchorStorePath: '',
+    mockXianyuSend: false
+  };
+
+  const store = new SessionStore({ ttlMs: config.sessionTtlMs });
+  const session = store.create({
+    conversation_id: 'cid_2',
+    buyer_id: 'buyer_2',
+    buyer_name: '买家2',
+    message_text: '第一条消息'
+  });
+
+  const app = createApp({
+    config,
+    store,
+    postJson: async () => {
+      throw new HttpError(502, '闲鱼桥接不可用');
+    }
+  });
+
+  const { server, baseUrl } = await listen(app);
+  try {
+    const result = await postJson(`${baseUrl}/agent/reply`, {
+      correlation_id: session.correlation_id,
+      reply_text: '收到，我看一下。',
+      lark_message_id: 'om_anchor_2'
+    });
+
+    assert.equal(result.status, 502);
+    assert.equal(store.getThreadAnchor('xianyu:cid_2:buyer_2').lark_message_id, 'om_anchor_2');
   } finally {
     server.close();
   }
