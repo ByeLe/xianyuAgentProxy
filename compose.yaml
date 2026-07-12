@@ -13,6 +13,7 @@ services:
       - "${AGENT_PROXY_PORT:-7892}:7892"
     volumes:
       - ./work:/app/work
+      - ${BOTMUX_DATA_DIR:-./work/botmux-data}:/botmux-data:ro
     restart: unless-stopped
 
   xianyu-bridge:

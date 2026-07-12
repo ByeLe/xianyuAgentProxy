@@ -6,7 +6,7 @@ import { requireOptionalBearer } from './auth.js';
 import { assertHttp, HttpError } from './errors.js';
 import { postJson as defaultPostJson } from './http.js';
 import { SessionStore } from './session-store.js';
-import { buildTopicPayload } from './topic-payload.js';
+import { buildTopicBootstrapPayload, buildTopicPayload } from './topic-payload.js';
 
 function normalizeInboundMessage(body) {
   const messageText = body.message_text || body.text;
@@ -167,7 +167,8 @@ export function createApp({
       return;
     }
 
-    const topicResult = await postJson(config.topicWebhookUrl, topicPayload, {
+    const bootstrapPayload = buildTopicBootstrapPayload(session, config);
+    const topicResult = await postJson(config.topicWebhookUrl, bootstrapPayload, {
       timeoutMs: config.requestTimeoutMs
     });
     const targetSessionId = topicResult.body?.target?.sessionId || topicResult.body?.sessionId || '';
@@ -178,8 +179,47 @@ export function createApp({
       targetSessionId
     });
 
+    if (threadAnchorFromBotmux?.lark_message_id && feishuClient?.enabled) {
+      const feishuResult = await feishuClient.replyMessage(threadAnchorFromBotmux.lark_message_id, topicPayload.text);
+      const updated = sessionStore.update(session.correlation_id, {
+        status: 'thread_queued',
+        topic_response: feishuResult,
+        bootstrap_response: topicResult.body,
+        lark_anchor_message_id: threadAnchorFromBotmux.lark_message_id
+      });
+
+      ctx.status = 202;
+      ctx.body = {
+        ok: true,
+        correlation_id: updated.correlation_id,
+        status: updated.status,
+        apiproxy_reply_url: topicPayload.apiproxy_reply_url,
+        thread_key: updated.thread_key,
+        lark_anchor_message_id: threadAnchorFromBotmux.lark_message_id,
+        bootstrap: topicResult.body,
+        topic: feishuResult
+      };
+
+      logInfo('topic.webhook.bootstrapped', {
+        correlation_id: updated.correlation_id,
+        thread_key: updated.thread_key,
+        action: topicResult.body?.action,
+        trigger_id: topicResult.body?.triggerId,
+        session_id: targetSessionId,
+        lark_anchor_message_id: threadAnchorFromBotmux.lark_message_id,
+        chat_id: topicResult.body?.target?.chatId
+      });
+      logInfo('feishu.thread.reply.queued', {
+        correlation_id: updated.correlation_id,
+        thread_key: updated.thread_key,
+        anchor_message_id: threadAnchorFromBotmux.lark_message_id,
+        feishu_message_id: feishuResult?.data?.message_id || feishuResult?.message_id
+      });
+      return;
+    }
+
     const updated = sessionStore.update(session.correlation_id, {
-      status: 'queued',
+      status: 'bootstrap_queued',
       topic_response: topicResult.body,
       lark_anchor_message_id: threadAnchorFromBotmux?.lark_message_id || ''
     });
@@ -192,6 +232,7 @@ export function createApp({
       apiproxy_reply_url: topicPayload.apiproxy_reply_url,
       thread_key: updated.thread_key,
       lark_anchor_message_id: threadAnchorFromBotmux?.lark_message_id || '',
+      warning: '话题已启动，但尚未通过飞书 API 投递买家消息；请检查飞书凭证和 botmux session 锚点配置。',
       topic: topicResult.body
     };
 
