@@ -9,7 +9,7 @@
   -> Python XianYuApis 常驻 WebSocket 进程
   -> POST /xianyu/message
   -> 话题群 Webhook（每条消息都会触发）
-  -> botmux 按 thread_key 复用话题并唤醒 agent
+  -> botmux 按 x-botmux-session-id 复用会话并唤醒 agent
   -> Codex CLI / agent
   -> POST /agent/reply
   -> Python XianYuApis /xianyu/send
@@ -21,13 +21,20 @@
 - 上行：闲鱼消息进入本服务，本服务每次都投递到话题群 Webhook。
 - 下行：agent 必须调用本服务 `/agent/reply`，本服务再转发给 Python 发信接口。
 
-关键点：本服务不会直接调用飞书 `reply_in_thread`。它只保证同一个闲鱼会话、同一个买家的消息使用完全相同的 `thread_key`：
+关键点：本服务不会直接调用飞书 `reply_in_thread`。它会把同一个闲鱼会话、同一个买家归一成稳定的业务键：
 
 ```text
 xianyu:<conversation_id>:<buyer_id>
 ```
 
-话题复用和 agent 唤醒由 botmux/connector 根据这个 `thread_key` 完成。
+首条消息投递 webhook 时会带 `x-botmux-async: 1`，并保存 botmux 返回的 `target.sessionId`。后续同一业务键的消息继续投递 webhook，同时带：
+
+```http
+x-botmux-async: 1
+x-botmux-session-id: <已保存的 sessionId>
+```
+
+这样 botmux 会把新消息送进已存在的 agent 会话，而不是新开 session。
 
 ## 快速开始
 
@@ -161,11 +168,12 @@ content-type: application/json
   "correlation_id": "xy_...",
   "status": "queued",
   "thread_key": "xianyu:闲鱼 cid:买家 id",
+  "botmux_session_id": "botmux session id",
   "apiproxy_reply_url": "http://你的地址/agent/reply"
 }
 ```
 
-每次收到闲鱼消息，本服务都会把 payload POST 到 `TOPIC_WEBHOOK_URL`。同一个 `conversation_id + buyer_id` 会生成相同的 `thread_key`，让 botmux 命中已有话题，并在该话题里触发新一轮 agent 处理。
+每次收到闲鱼消息，本服务都会把 payload POST 到 `TOPIC_WEBHOOK_URL`。同一个 `conversation_id + buyer_id` 会生成相同的 `thread_key`，并映射到同一个 botmux `sessionId`。如果已保存的 botmux session 失效，本服务会删除旧映射并按首条消息重建。
 
 ### agent 回写
 
@@ -224,9 +232,10 @@ GET /sessions/:correlation_id
 - `XIANYU_INBOUND_TOKEN`：开启后，Python 调 `/xianyu/message` 必须带 `Authorization: Bearer <token>`。
 - `XIANYU_SEND_TOKEN`：开启后，Node 调 Python `/xianyu/send` 必须带 `Authorization: Bearer <token>`。
 - `AGENT_REPLY_TOKEN`：开启后，agent 调 `/agent/reply` 必须带 `Authorization: Bearer <token>`。
+- `BOTMUX_SESSION_STORE_PATH`：botmux session 映射落盘文件，Docker Compose 默认写到 `/app/work/botmux-sessions.json`。
 
 如果设置了 `AGENT_REPLY_TOKEN`，本服务会把 `apiproxy_reply_token` 一并投递到话题群 payload，方便 agent 回写。
 
 ## 后续建议
 
-当前版本 `correlation_id` 会话状态保存在内存里，适合先跑通闭环。生产使用时建议把 `SessionStore` 换成 Redis，这样服务重启后不会丢失尚未回写的 `correlation_id`。
+当前版本 `correlation_id` 会话状态保存在内存里，适合先跑通闭环；botmux session 映射会按 `BOTMUX_SESSION_STORE_PATH` 落盘。生产使用时建议把 `SessionStore` 换成 Redis，这样服务重启后不会丢失尚未回写的 `correlation_id`。

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import { buildConversationKey } from './topic-payload.js';
 
@@ -7,9 +9,12 @@ function nowIso() {
 }
 
 export class SessionStore {
-  constructor({ ttlMs }) {
+  constructor({ ttlMs, botmuxSessionStorePath = '' }) {
     this.ttlMs = ttlMs;
+    this.botmuxSessionStorePath = botmuxSessionStorePath;
     this.sessions = new Map();
+    this.conversationSessions = new Map();
+    this.loadConversationSessions();
   }
 
   create(input) {
@@ -74,5 +79,59 @@ export class SessionStore {
         this.sessions.delete(correlationId);
       }
     }
+  }
+
+  getConversationSession(conversationKey) {
+    return this.conversationSessions.get(conversationKey) || null;
+  }
+
+  setConversationSession(conversationKey, patch) {
+    const existing = this.conversationSessions.get(conversationKey) || {};
+    const now = nowIso();
+    const conversationSession = {
+      ...existing,
+      ...patch,
+      conversation_key: conversationKey,
+      updated_at: now,
+      created_at: existing.created_at || now
+    };
+    this.conversationSessions.set(conversationKey, conversationSession);
+    this.saveConversationSessions();
+    return conversationSession;
+  }
+
+  deleteConversationSession(conversationKey) {
+    const deleted = this.conversationSessions.delete(conversationKey);
+    if (deleted) this.saveConversationSessions();
+    return deleted;
+  }
+
+  loadConversationSessions() {
+    if (!this.botmuxSessionStorePath || !existsSync(this.botmuxSessionStorePath)) return;
+
+    try {
+      const raw = readFileSync(this.botmuxSessionStorePath, 'utf8');
+      const data = JSON.parse(raw);
+      for (const item of data.conversation_sessions || []) {
+        if (item.conversation_key) {
+          this.conversationSessions.set(item.conversation_key, item);
+        }
+      }
+    } catch {
+      this.conversationSessions.clear();
+    }
+  }
+
+  saveConversationSessions() {
+    if (!this.botmuxSessionStorePath) return;
+
+    mkdirSync(dirname(this.botmuxSessionStorePath), { recursive: true });
+    const data = {
+      version: 1,
+      conversation_sessions: [...this.conversationSessions.values()]
+    };
+    const tmpPath = `${this.botmuxSessionStorePath}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    renameSync(tmpPath, this.botmuxSessionStorePath);
   }
 }

@@ -69,6 +69,89 @@ function buildXianyuSendPayload(session, replyText) {
   };
 }
 
+function buildTopicHeaders(botmuxSessionId = '') {
+  const headers = {
+    'x-botmux-async': '1'
+  };
+  if (botmuxSessionId) {
+    headers['x-botmux-session-id'] = botmuxSessionId;
+  }
+  return headers;
+}
+
+function extractBotmuxSessionId(topicBody) {
+  const value = topicBody?.target?.sessionId || topicBody?.sessionId;
+  return value ? String(value) : '';
+}
+
+function isStaleBotmuxSessionError(error) {
+  if (!(error instanceof HttpError)) return false;
+  if (error.status === 404 || error.status === 410) return true;
+
+  const text = `${error.message || ''} ${JSON.stringify(error.details || '')}`;
+  return /session/i.test(text)
+    && /(not found|missing|expired|invalid|不存在|过期|无效)/i.test(text);
+}
+
+async function postTopicWebhook({ config, postJson, sessionStore, session, topicPayload }) {
+  const conversationSession = sessionStore.getConversationSession(session.thread_key);
+  const botmuxSessionId = conversationSession?.botmux_session_id || '';
+
+  try {
+    const result = await postJson(config.topicWebhookUrl, topicPayload, {
+      timeoutMs: config.requestTimeoutMs,
+      headers: buildTopicHeaders(botmuxSessionId)
+    });
+    return {
+      result,
+      requestedBotmuxSessionId: botmuxSessionId,
+      retried: false
+    };
+  } catch (error) {
+    if (!botmuxSessionId || !isStaleBotmuxSessionError(error)) {
+      throw error;
+    }
+
+    sessionStore.deleteConversationSession(session.thread_key);
+    logInfo('botmux.session.stale', {
+      correlation_id: session.correlation_id,
+      thread_key: session.thread_key,
+      botmux_session_id: botmuxSessionId,
+      status: error.status
+    });
+
+    const result = await postJson(config.topicWebhookUrl, topicPayload, {
+      timeoutMs: config.requestTimeoutMs,
+      headers: buildTopicHeaders()
+    });
+    return {
+      result,
+      requestedBotmuxSessionId: '',
+      retried: true
+    };
+  }
+}
+
+function rememberBotmuxSession(sessionStore, session, topicBody) {
+  const botmuxSessionId = extractBotmuxSessionId(topicBody);
+  if (!botmuxSessionId) return null;
+
+  const conversationSession = sessionStore.setConversationSession(session.thread_key, {
+    botmux_session_id: botmuxSessionId,
+    conversation_id: session.conversation_id,
+    buyer_id: session.buyer_id,
+    buyer_name: session.buyer_name,
+    last_correlation_id: session.correlation_id
+  });
+
+  logInfo('botmux.session.saved', {
+    thread_key: conversationSession.conversation_key,
+    botmux_session_id: conversationSession.botmux_session_id,
+    last_correlation_id: conversationSession.last_correlation_id
+  });
+  return conversationSession;
+}
+
 function applyErrorMiddleware(app) {
   app.use(async (ctx, next) => {
     try {
@@ -93,7 +176,8 @@ export function createApp({ config, store, postJson = defaultPostJson } = {}) {
   const app = new Koa();
   const router = new Router();
   const sessionStore = store || new SessionStore({
-    ttlMs: config.sessionTtlMs
+    ttlMs: config.sessionTtlMs,
+    botmuxSessionStorePath: config.botmuxSessionStorePath
   });
 
   applyErrorMiddleware(app);
@@ -121,13 +205,24 @@ export function createApp({ config, store, postJson = defaultPostJson } = {}) {
       message_preview: previewText(session.message_text)
     });
 
-    const topicResult = await postJson(config.topicWebhookUrl, topicPayload, {
-      timeoutMs: config.requestTimeoutMs
+    const {
+      result: topicResult,
+      requestedBotmuxSessionId,
+      retried
+    } = await postTopicWebhook({
+      config,
+      postJson,
+      sessionStore,
+      session,
+      topicPayload
     });
+    const conversationSession = rememberBotmuxSession(sessionStore, session, topicResult.body);
+    const botmuxSessionId = conversationSession?.botmux_session_id || extractBotmuxSessionId(topicResult.body);
 
     const updated = sessionStore.update(session.correlation_id, {
       status: 'queued',
-      topic_response: topicResult.body
+      topic_response: topicResult.body,
+      botmux_session_id: botmuxSessionId
     });
 
     ctx.status = 202;
@@ -137,6 +232,9 @@ export function createApp({ config, store, postJson = defaultPostJson } = {}) {
       status: updated.status,
       apiproxy_reply_url: topicPayload.apiproxy_reply_url,
       thread_key: updated.thread_key,
+      botmux_session_id: botmuxSessionId,
+      botmux_session_reused: Boolean(requestedBotmuxSessionId),
+      botmux_session_retried: retried,
       topic: topicResult.body
     };
 
@@ -146,6 +244,9 @@ export function createApp({ config, store, postJson = defaultPostJson } = {}) {
       action: topicResult.body?.action,
       trigger_id: topicResult.body?.triggerId,
       session_id: topicResult.body?.target?.sessionId,
+      requested_session_id: requestedBotmuxSessionId,
+      reused_session: Boolean(requestedBotmuxSessionId),
+      retried,
       chat_id: topicResult.body?.target?.chatId
     });
   });
