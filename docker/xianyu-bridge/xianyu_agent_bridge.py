@@ -121,6 +121,38 @@ def preview_text(value, max_length=80):
     return f"{text[:max_length]}..."
 
 
+def dedupe_cookie_name(cookie_jar, name):
+    cookies = [cookie for cookie in cookie_jar if cookie.name == name]
+    if len(cookies) <= 1:
+        return False
+
+    # requests raises CookieConflictError when the same name exists on multiple
+    # domains/paths. Keep the freshest-looking value and remove the rest.
+    chosen = max(
+        cookies,
+        key=lambda cookie: (
+            cookie.expires or 0,
+            bool(cookie.domain),
+            len(cookie.value or ""),
+        ),
+    )
+    for cookie in cookies:
+        if cookie is chosen:
+            continue
+        cookie_jar.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
+    return True
+
+
+def dedupe_mtop_cookies(session):
+    changed_names = []
+    for name in ("_m_h5_tk", "_m_h5_tk_enc"):
+        if dedupe_cookie_name(session.cookies, name):
+            changed_names.append(name)
+    if changed_names:
+        logger.warning("deduplicated duplicate cookies: {}", ",".join(changed_names))
+    return bool(changed_names)
+
+
 def shape_sample(value, path="$", depth=0, max_depth=5, max_items=8):
     if depth > max_depth:
         return [f"{path}:..."]
@@ -255,6 +287,7 @@ def extract_chat_event(payload, myid):
 class XianyuAgentBridge(XianyuLive):
     def __init__(self, cookies_str):
         super().__init__(cookies_str)
+        self.patch_xianyu_cookie_conflicts()
         self.active_ws = None
         self.http_runner = None
         self.client = None
@@ -266,6 +299,18 @@ class XianyuAgentBridge(XianyuLive):
         self.http_port = env_int("BRIDGE_PORT", 7893)
         self.seen_history_keys = OrderedDict()
         self.max_seen_history_keys = env_int("MAX_SEEN_HISTORY_KEYS", 200)
+
+    def patch_xianyu_cookie_conflicts(self):
+        original_get_token = getattr(self.xianyu, "get_token", None)
+        if not original_get_token or getattr(original_get_token, "_apiproxy_cookie_patch", False):
+            return
+
+        def get_token_with_cookie_dedupe(*args, **kwargs):
+            dedupe_mtop_cookies(self.xianyu.session)
+            return original_get_token(*args, **kwargs)
+
+        get_token_with_cookie_dedupe._apiproxy_cookie_patch = True
+        self.xianyu.get_token = get_token_with_cookie_dedupe
 
     async def start(self):
         self.client = ClientSession(timeout=ClientTimeout(total=self.request_timeout))
@@ -401,6 +446,8 @@ class XianyuAgentBridge(XianyuLive):
         while True:
             heartbeat_task = None
             try:
+                dedupe_mtop_cookies(self.xianyu.session)
+                headers["Cookie"] = get_session_cookies_str(self.xianyu.session)
                 async with websockets.connect(self.base_url, extra_headers=headers) as websocket:
                     self.active_ws = websocket
                     await self.init(websocket)
