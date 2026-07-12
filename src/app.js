@@ -35,8 +35,17 @@ function normalizeReply(body) {
 
   return {
     correlation_id: String(body.correlation_id),
-    reply_text: replyText
+    reply_text: replyText,
+    lark_message_id: normalizeLarkMessageId(body)
   };
+}
+
+function normalizeLarkMessageId(body) {
+  const value = body.lark_message_id
+    || body.feishu_message_id
+    || body.thread_message_id
+    || body.message_id;
+  return value ? String(value) : '';
 }
 
 function previewText(value, max = 80) {
@@ -89,9 +98,13 @@ function applyErrorMiddleware(app) {
   });
 }
 
-export function createApp({ config, store = new SessionStore({ ttlMs: config.sessionTtlMs }), postJson = defaultPostJson } = {}) {
+export function createApp({ config, store, postJson = defaultPostJson, feishuClient = null } = {}) {
   const app = new Koa();
   const router = new Router();
+  const sessionStore = store || new SessionStore({
+    ttlMs: config.sessionTtlMs,
+    anchorStorePath: config.threadAnchorStorePath
+  });
 
   applyErrorMiddleware(app);
   app.use(bodyParser({ jsonLimit: '2mb' }));
@@ -105,23 +118,54 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
 
   router.post('/xianyu/message', requireOptionalBearer(config.xianyuInboundToken), async (ctx) => {
     const input = normalizeInboundMessage(ctx.request.body);
-    const session = store.create(input);
+    const session = sessionStore.create(input);
     const topicPayload = buildTopicPayload(session, config);
+    const threadAnchor = sessionStore.getThreadAnchor(session.thread_key);
 
     logInfo('xianyu.message.received', {
       correlation_id: session.correlation_id,
       conversation_id: session.conversation_id,
       buyer_id: maskId(session.buyer_id),
       buyer_name: session.buyer_name,
+      thread_key: session.thread_key,
+      has_lark_anchor: Boolean(threadAnchor?.lark_message_id),
       message_length: session.message_text.length,
       message_preview: previewText(session.message_text)
     });
+
+    if (threadAnchor?.lark_message_id && feishuClient?.enabled) {
+      const feishuResult = await feishuClient.replyMessage(threadAnchor.lark_message_id, topicPayload.text);
+      const updated = sessionStore.update(session.correlation_id, {
+        status: 'thread_queued',
+        topic_response: feishuResult,
+        lark_anchor_message_id: threadAnchor.lark_message_id
+      });
+
+      ctx.status = 202;
+      ctx.body = {
+        ok: true,
+        correlation_id: updated.correlation_id,
+        status: updated.status,
+        apiproxy_reply_url: topicPayload.apiproxy_reply_url,
+        thread_key: updated.thread_key,
+        lark_anchor_message_id: threadAnchor.lark_message_id,
+        topic: feishuResult
+      };
+
+      logInfo('feishu.thread.reply.queued', {
+        correlation_id: updated.correlation_id,
+        thread_key: updated.thread_key,
+        anchor_message_id: threadAnchor.lark_message_id,
+        feishu_message_id: feishuResult?.data?.message_id || feishuResult?.message_id
+      });
+      return;
+    }
 
     const topicResult = await postJson(config.topicWebhookUrl, topicPayload, {
       timeoutMs: config.requestTimeoutMs
     });
 
-    const updated = store.update(session.correlation_id, {
+    const updated = sessionStore.update(session.correlation_id, {
       status: 'queued',
       topic_response: topicResult.body
     });
@@ -132,11 +176,13 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
       correlation_id: updated.correlation_id,
       status: updated.status,
       apiproxy_reply_url: topicPayload.apiproxy_reply_url,
+      thread_key: updated.thread_key,
       topic: topicResult.body
     };
 
     logInfo('topic.webhook.queued', {
       correlation_id: updated.correlation_id,
+      thread_key: updated.thread_key,
       action: topicResult.body?.action,
       trigger_id: topicResult.body?.triggerId,
       session_id: topicResult.body?.target?.sessionId,
@@ -146,18 +192,20 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
 
   router.post('/agent/reply', requireOptionalBearer(config.agentReplyToken), async (ctx) => {
     const input = normalizeReply(ctx.request.body);
-    const session = store.get(input.correlation_id);
+    const session = sessionStore.get(input.correlation_id);
     assertHttp(session, 404, '找不到 correlation_id 对应的闲鱼会话');
 
     logInfo('agent.reply.received', {
       correlation_id: input.correlation_id,
       conversation_id: session.conversation_id,
+      thread_key: session.thread_key,
+      has_lark_message_id: Boolean(input.lark_message_id),
       reply_length: input.reply_text.length,
       reply_preview: previewText(input.reply_text)
     });
 
     if (config.mockXianyuSend) {
-      const updated = store.update(input.correlation_id, {
+      const updated = sessionStore.update(input.correlation_id, {
         status: 'mock_sent',
         reply_text: input.reply_text,
         xianyu_response: {
@@ -165,6 +213,7 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
           mocked: true
         }
       });
+      rememberLarkAnchor(sessionStore, updated, input.lark_message_id);
 
       ctx.body = {
         ok: true,
@@ -187,11 +236,12 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
       headers: sendHeaders
     });
 
-    const updated = store.update(input.correlation_id, {
+    const updated = sessionStore.update(input.correlation_id, {
       status: 'sent',
       reply_text: input.reply_text,
       xianyu_response: xianyuResult.body
     });
+    rememberLarkAnchor(sessionStore, updated, input.lark_message_id);
 
     ctx.body = {
       ok: true,
@@ -203,12 +253,13 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
     logInfo('xianyu.reply.sent', {
       correlation_id: updated.correlation_id,
       conversation_id: updated.conversation_id,
+      thread_key: updated.thread_key,
       xianyu_ok: xianyuResult.body?.ok
     });
   });
 
   router.get('/sessions/:correlation_id', (ctx) => {
-    const session = store.get(ctx.params.correlation_id);
+    const session = sessionStore.get(ctx.params.correlation_id);
     assertHttp(session, 404, '找不到 correlation_id 对应的闲鱼会话');
     ctx.body = {
       ok: true,
@@ -220,4 +271,21 @@ export function createApp({ config, store = new SessionStore({ ttlMs: config.ses
   app.use(router.allowedMethods());
 
   return app;
+}
+
+function rememberLarkAnchor(store, session, larkMessageId) {
+  if (!larkMessageId) return null;
+  const anchor = store.setThreadAnchor(session.thread_key, {
+    lark_message_id: larkMessageId,
+    conversation_id: session.conversation_id,
+    buyer_id: session.buyer_id,
+    buyer_name: session.buyer_name,
+    last_correlation_id: session.correlation_id
+  });
+  logInfo('lark.thread.anchor.saved', {
+    thread_key: anchor.thread_key,
+    lark_message_id: anchor.lark_message_id,
+    last_correlation_id: anchor.last_correlation_id
+  });
+  return anchor;
 }

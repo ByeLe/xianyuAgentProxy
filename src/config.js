@@ -30,6 +30,10 @@ export function loadConfig(env = process.env) {
     xianyuSendToken: env.XIANYU_SEND_TOKEN || '',
     xianyuInboundToken: env.XIANYU_INBOUND_TOKEN || '',
     agentReplyToken: env.AGENT_REPLY_TOKEN || '',
+    feishuAppId: env.FEISHU_APP_ID || '',
+    feishuAppSecret: env.FEISHU_APP_SECRET || '',
+    feishuBaseUrl: trimRightSlash(env.FEISHU_BASE_URL || 'https://open.feishu.cn'),
+    threadAnchorStorePath: env.THREAD_ANCHOR_STORE_PATH || '',
     requestTimeoutMs: numberFromEnv(env.REQUEST_TIMEOUT_MS, 20000),
     sessionTtlMs: numberFromEnv(env.SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),
     mockXianyuSend: boolFromEnv(env.MOCK_XIANYU_SEND, false)

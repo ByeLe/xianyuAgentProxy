@@ -43,6 +43,7 @@ test('闲鱼消息会被投递到话题群，并返回 correlation_id', async ()
     agentReplyToken: '',
     requestTimeoutMs: 1000,
     sessionTtlMs: 60000,
+    threadAnchorStorePath: '',
     mockXianyuSend: false
   };
 
@@ -71,7 +72,70 @@ test('闲鱼消息会被投递到话题群，并返回 correlation_id', async ()
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, config.topicWebhookUrl);
     assert.equal(calls[0].payload.message_text, '还在吗');
+    assert.equal(calls[0].payload.thread_key, 'xianyu:cid_1:buyer_1');
+    assert.equal(calls[0].payload.instruction, undefined);
+    assert.ok(!calls[0].payload.text.includes('你是闲鱼客服代理'));
     assert.equal(calls[0].payload.apiproxy_reply_url, 'http://proxy.local/agent/reply');
+  } finally {
+    server.close();
+  }
+});
+
+test('已有飞书话题锚点时，闲鱼消息会回复到原话题', async () => {
+  const webhookCalls = [];
+  const feishuCalls = [];
+  const config = {
+    publicBaseUrl: 'http://proxy.local',
+    topicWebhookUrl: 'http://topic.local/webhook',
+    xianyuSendUrl: 'http://xianyu.local/send',
+    xianyuSendToken: '',
+    xianyuInboundToken: '',
+    agentReplyToken: '',
+    requestTimeoutMs: 1000,
+    sessionTtlMs: 60000,
+    threadAnchorStorePath: '',
+    mockXianyuSend: false
+  };
+
+  const store = new SessionStore({ ttlMs: config.sessionTtlMs });
+  store.setThreadAnchor('xianyu:cid_1:buyer_1', {
+    lark_message_id: 'om_anchor',
+    conversation_id: 'cid_1',
+    buyer_id: 'buyer_1'
+  });
+
+  const app = createApp({
+    config,
+    store,
+    postJson: async (url, payload, options) => {
+      webhookCalls.push({ url, payload, options });
+      return { status: 200, body: { ok: true, action: 'queued' } };
+    },
+    feishuClient: {
+      enabled: true,
+      replyMessage: async (messageId, text) => {
+        feishuCalls.push({ messageId, text });
+        return { code: 0, data: { message_id: 'om_reply' } };
+      }
+    }
+  });
+
+  const { server, baseUrl } = await listen(app);
+  try {
+    const result = await postJson(`${baseUrl}/xianyu/message`, {
+      conversation_id: 'cid_1',
+      buyer_id: 'buyer_1',
+      buyer_name: '买家',
+      message_text: '继续问一句'
+    });
+
+    assert.equal(result.status, 202);
+    assert.equal(result.body.status, 'thread_queued');
+    assert.equal(result.body.lark_anchor_message_id, 'om_anchor');
+    assert.equal(webhookCalls.length, 0);
+    assert.equal(feishuCalls.length, 1);
+    assert.equal(feishuCalls[0].messageId, 'om_anchor');
+    assert.match(feishuCalls[0].text, /继续问一句/);
   } finally {
     server.close();
   }
@@ -88,6 +152,7 @@ test('agent 回写会转发到闲鱼发送接口', async () => {
     agentReplyToken: 'secret',
     requestTimeoutMs: 1000,
     sessionTtlMs: 60000,
+    threadAnchorStorePath: '',
     mockXianyuSend: false
   };
 
@@ -112,7 +177,8 @@ test('agent 回写会转发到闲鱼发送接口', async () => {
   try {
     const result = await postJson(`${baseUrl}/agent/reply`, {
       correlation_id: session.correlation_id,
-      reply_text: '在的，可以拍。'
+      reply_text: '在的，可以拍。',
+      lark_message_id: 'om_anchor'
     }, {
       authorization: 'Bearer secret'
     });
@@ -126,6 +192,7 @@ test('agent 回写会转发到闲鱼发送接口', async () => {
     assert.equal(calls[0].payload.buyer_id, 'buyer_1');
     assert.equal(calls[0].payload.text, '在的，可以拍。');
     assert.equal(calls[0].options.headers.Authorization, 'Bearer send-secret');
+    assert.equal(store.getThreadAnchor('xianyu:cid_1:buyer_1').lark_message_id, 'om_anchor');
   } finally {
     server.close();
   }
@@ -141,6 +208,7 @@ test('agent 回写鉴权失败会返回 401', async () => {
     agentReplyToken: 'secret',
     requestTimeoutMs: 1000,
     sessionTtlMs: 60000,
+    threadAnchorStorePath: '',
     mockXianyuSend: true
   };
 

@@ -8,7 +8,8 @@
 闲鱼买家
   -> Python XianYuApis 常驻 WebSocket 进程
   -> POST /xianyu/message
-  -> 话题群 Webhook
+  -> 首次：话题群 Webhook
+  -> 后续：飞书消息 reply_in_thread
   -> Codex CLI / agent
   -> POST /agent/reply
   -> Python XianYuApis /xianyu/send
@@ -144,9 +145,18 @@ content-type: application/json
   "ok": true,
   "correlation_id": "xy_...",
   "status": "queued",
+  "thread_key": "xianyu:闲鱼 cid:买家 id",
   "apiproxy_reply_url": "http://你的地址/agent/reply"
 }
 ```
+
+如果这个 `thread_key` 已经保存过飞书消息锚点，本服务不会再调用话题群 Webhook，而是调用飞书接口：
+
+```http
+POST https://open.feishu.cn/open-apis/im/v1/messages/:message_id/reply
+```
+
+请求里会带 `reply_in_thread: true`，让后续同一买家的消息进入原飞书话题。
 
 ### agent 回写
 
@@ -160,7 +170,8 @@ content-type: application/json
 ```json
 {
   "correlation_id": "xy_...",
-  "reply_text": "最终要发给买家的中文回复"
+  "reply_text": "最终要发给买家的中文回复",
+  "lark_message_id": "当前飞书话题内可被 reply 的消息 ID"
 }
 ```
 
@@ -176,6 +187,14 @@ content-type: application/json
 }
 ```
 
+`lark_message_id` 可选，但建议让 agent 每次都带上。服务会按：
+
+```text
+xianyu:<conversation_id>:<buyer_id>
+```
+
+保存这条飞书消息 ID。下一次同一个闲鱼会话、同一个买家的消息到来时，就直接回复到这条飞书消息所在的话题。
+
 ### 查询会话状态
 
 ```http
@@ -184,7 +203,7 @@ GET /sessions/:correlation_id
 
 ## agent 提示词建议
 
-投递到话题群的消息里已经包含了 `instruction` 和 `text` 字段。你也可以在 agent 系统提示词里固定强调：
+投递到话题群的 payload 不再内置客服提示词。建议在 agent / botmux 的可信提示词里固定强调：
 
 ```text
 你是闲鱼客服代理。收到来自闲鱼买家的消息后，先理解买家意图，再生成自然、简短、可以直接发送给买家的中文回复。
@@ -194,7 +213,8 @@ GET /sessions/:correlation_id
 调用 JSON：
 {
   "correlation_id": "<收到的 correlation_id>",
-  "reply_text": "<最终要发给买家的中文回复>"
+  "reply_text": "<最终要发给买家的中文回复>",
+  "lark_message_id": "<当前飞书消息 ID，用于后续 reply_in_thread>"
 }
 ```
 
@@ -205,9 +225,11 @@ GET /sessions/:correlation_id
 - `XIANYU_INBOUND_TOKEN`：开启后，Python 调 `/xianyu/message` 必须带 `Authorization: Bearer <token>`。
 - `XIANYU_SEND_TOKEN`：开启后，Node 调 Python `/xianyu/send` 必须带 `Authorization: Bearer <token>`。
 - `AGENT_REPLY_TOKEN`：开启后，agent 调 `/agent/reply` 必须带 `Authorization: Bearer <token>`。
+- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：开启后，已有飞书锚点的闲鱼消息会通过飞书 reply 接口进入原话题。
+- `THREAD_ANCHOR_STORE_PATH`：飞书锚点落盘文件，Docker Compose 默认写到 `/app/work/thread-anchors.json`。
 
 如果设置了 `AGENT_REPLY_TOKEN`，本服务会把 `apiproxy_reply_token` 一并投递到话题群 payload，方便 agent 回写。
 
 ## 后续建议
 
-当前版本会话状态保存在内存里，适合先跑通闭环。生产使用时建议把 `SessionStore` 换成 Redis，这样服务重启后不会丢失尚未回写的 `correlation_id`。
+当前版本 `correlation_id` 会话状态保存在内存里，适合先跑通闭环；飞书话题锚点会按 `THREAD_ANCHOR_STORE_PATH` 落盘。生产使用时建议把 `SessionStore` 换成 Redis，这样服务重启后不会丢失尚未回写的 `correlation_id`。
