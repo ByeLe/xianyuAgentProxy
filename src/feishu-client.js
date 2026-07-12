@@ -20,12 +20,16 @@ export class FeishuClient {
     appSecret,
     baseUrl = 'https://open.feishu.cn',
     timeoutMs = 20000,
+    mentionOpenId = '',
+    mentionName = '',
     fetchImpl = fetch
   }) {
     this.appId = appId;
     this.appSecret = appSecret;
     this.baseUrl = trimRightSlash(baseUrl);
     this.timeoutMs = timeoutMs;
+    this.mentionOpenId = mentionOpenId;
+    this.mentionName = mentionName || mentionOpenId;
     this.fetch = fetchImpl;
     this.cachedToken = null;
   }
@@ -98,10 +102,15 @@ export class FeishuClient {
     const token = await this.getTenantAccessToken();
     return this.post(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
       msg_type: 'text',
-      content: JSON.stringify({ text }),
+      content: JSON.stringify({ text: this.buildReplyText(text) }),
       reply_in_thread: true
     }, {
       authorization: `Bearer ${token}`
     });
+  }
+
+  buildReplyText(text) {
+    if (!this.mentionOpenId) return text;
+    return `<at user_id="${this.mentionOpenId}">${this.mentionName}</at>\n${text}`;
   }
 }

@@ -9,7 +9,7 @@
   -> Python XianYuApis 常驻 WebSocket 进程
   -> POST /xianyu/message
   -> 首次：话题群 Webhook
-  -> 后续：飞书消息 reply_in_thread
+  -> 后续：回复机器人发飞书 reply_in_thread，并 @ 原 agent 机器人
   -> Codex CLI / agent
   -> POST /agent/reply
   -> Python XianYuApis /xianyu/send
@@ -35,7 +35,7 @@ cp .env.example .env
 
 ```env
 AGENT_PROXY_PORT=7894
-PUBLIC_BASE_URL=http://192.168.0.106:7894
+PUBLIC_BASE_URL=http://127.0.0.1:7894
 TOPIC_WEBHOOK_URL=你的咸鱼话题群 Webhook
 XIANYU_COOKIES=你的闲鱼登录 cookie
 ```
@@ -92,7 +92,7 @@ XIANYU_SEND_URL=http://xianyu-bridge:7893/xianyu/send
 PROXY_MESSAGE_URL=http://agent-proxy:7892/xianyu/message
 ```
 
-连起来。`PUBLIC_BASE_URL` 仍然要写成 agent 能访问到的地址，例如你的局域网地址 `http://192.168.0.106:7894`。
+连起来。`PUBLIC_BASE_URL` 仍然要写成 agent 能访问到的地址。botmux/agent 跑在同一台 Mac 上时，推荐使用 `http://127.0.0.1:7894`；如果 agent 跑在别的机器上，再改成那台机器能访问到的局域网地址。
 
 第一次构建 `xianyu-bridge` 镜像时，会拉取 `cv-cat/XianYuApis` 并安装 Python/Node 依赖，所以会慢一点。
 
@@ -163,7 +163,7 @@ content-type: application/json
 POST https://open.feishu.cn/open-apis/im/v1/messages/:message_id/reply
 ```
 
-请求里会带 `reply_in_thread: true`，让后续同一买家的消息进入原飞书话题。
+请求里会带 `reply_in_thread: true`，让后续同一买家的消息进入原飞书话题。如果配置了 `FEISHU_REPLY_MENTION_OPEN_ID`，回复内容前面会自动加上对原 agent 机器人的 @，用来唤醒它继续处理。
 
 ### agent 回写
 
@@ -232,7 +232,9 @@ GET /sessions/:correlation_id
 - `XIANYU_INBOUND_TOKEN`：开启后，Python 调 `/xianyu/message` 必须带 `Authorization: Bearer <token>`。
 - `XIANYU_SEND_TOKEN`：开启后，Node 调 Python `/xianyu/send` 必须带 `Authorization: Bearer <token>`。
 - `AGENT_REPLY_TOKEN`：开启后，agent 调 `/agent/reply` 必须带 `Authorization: Bearer <token>`。
-- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：开启后，已有飞书锚点的闲鱼消息会通过飞书 reply 接口进入原话题。
+- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：默认飞书应用凭证。
+- `FEISHU_REPLY_APP_ID` / `FEISHU_REPLY_APP_SECRET`：可选，用另一个机器人发送飞书 thread reply；不填则回退到 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`。
+- `FEISHU_REPLY_MENTION_OPEN_ID` / `FEISHU_REPLY_MENTION_NAME`：可选，thread reply 前置 @，用于唤醒原 agent 机器人。
 - `THREAD_ANCHOR_STORE_PATH`：飞书锚点落盘文件，Docker Compose 默认写到 `/app/work/thread-anchors.json`。
 
 如果设置了 `AGENT_REPLY_TOKEN`，本服务会把 `apiproxy_reply_token` 一并投递到话题群 payload，方便 agent 回写。

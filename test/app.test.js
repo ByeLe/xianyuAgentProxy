@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import { createApp } from '../src/app.js';
 import { HttpError } from '../src/errors.js';
+import { FeishuClient } from '../src/feishu-client.js';
 import { SessionStore } from '../src/session-store.js';
 
 function listen(app) {
@@ -140,6 +141,40 @@ test('已有飞书话题锚点时，闲鱼消息会回复到原话题', async ()
   } finally {
     server.close();
   }
+});
+
+test('飞书话题回复会带上目标机器人 mention', async () => {
+  const requests = [];
+  const client = new FeishuClient({
+    appId: 'reply-bot',
+    appSecret: 'reply-secret',
+    mentionOpenId: 'ou_agent_bot',
+    mentionName: '客服机器人',
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      if (String(url).includes('/tenant_access_token/internal')) {
+        return new Response(JSON.stringify({
+          code: 0,
+          tenant_access_token: 'tenant-token',
+          expire: 7200
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { message_id: 'om_reply' }
+      }), { status: 200 });
+    }
+  });
+
+  const result = await client.replyMessage('om_anchor', '【闲鱼买家消息】\n继续问一句');
+
+  assert.equal(result.code, 0);
+  assert.equal(requests.length, 2);
+  const replyBody = JSON.parse(requests[1].options.body);
+  const content = JSON.parse(replyBody.content);
+  assert.equal(replyBody.reply_in_thread, true);
+  assert.match(content.text, /^<at user_id="ou_agent_bot">客服机器人<\/at>\n/);
+  assert.match(content.text, /继续问一句/);
 });
 
 test('agent 回写会转发到闲鱼发送接口', async () => {

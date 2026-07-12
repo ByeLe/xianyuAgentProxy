@@ -3,12 +3,14 @@ import { loadConfig } from './config.js';
 import { FeishuClient } from './feishu-client.js';
 
 const config = loadConfig();
-const feishuClient = config.feishuAppId && config.feishuAppSecret
+const feishuClient = config.feishuReplyAppId && config.feishuReplyAppSecret
   ? new FeishuClient({
-    appId: config.feishuAppId,
-    appSecret: config.feishuAppSecret,
+    appId: config.feishuReplyAppId,
+    appSecret: config.feishuReplyAppSecret,
     baseUrl: config.feishuBaseUrl,
-    timeoutMs: config.requestTimeoutMs
+    timeoutMs: config.requestTimeoutMs,
+    mentionOpenId: config.feishuReplyMentionOpenId,
+    mentionName: config.feishuReplyMentionName
   })
   : null;
 const app = createApp({ config, feishuClient });
