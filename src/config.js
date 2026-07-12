@@ -37,6 +37,8 @@ export function loadConfig(env = process.env) {
     feishuReplyMentionOpenId: env.FEISHU_REPLY_MENTION_OPEN_ID || '',
     feishuReplyMentionName: env.FEISHU_REPLY_MENTION_NAME || '',
     feishuBaseUrl: trimRightSlash(env.FEISHU_BASE_URL || 'https://open.feishu.cn'),
+    botmuxTargetAppId: env.BOTMUX_TARGET_APP_ID || env.FEISHU_APP_ID || '',
+    botmuxTargetSessionsPath: env.BOTMUX_TARGET_SESSIONS_PATH || '',
     threadAnchorStorePath: env.THREAD_ANCHOR_STORE_PATH || '',
     requestTimeoutMs: numberFromEnv(env.REQUEST_TIMEOUT_MS, 20000),
     sessionTtlMs: numberFromEnv(env.SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),

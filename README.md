@@ -165,6 +165,8 @@ POST https://open.feishu.cn/open-apis/im/v1/messages/:message_id/reply
 
 请求里会带 `reply_in_thread: true`，让后续同一买家的消息进入原飞书话题。如果配置了 `FEISHU_REPLY_MENTION_OPEN_ID`，回复内容前面会自动加上对原 agent 机器人的 @，用来唤醒它继续处理。
 
+首条 webhook 创建 botmux session 后，本服务会优先用返回的 `sessionId` 读取 botmux session 文件里的 `rootMessageId`，并自动保存为飞书话题锚点。这样即使 agent 首次回调没有带 `lark_message_id`，同一买家的后续消息也可以直接走飞书 thread reply。
+
 ### agent 回写
 
 由 Codex CLI / agent 调用：
@@ -194,7 +196,7 @@ content-type: application/json
 }
 ```
 
-`lark_message_id` 可选，但建议让 agent 每次都带上。服务会按：
+`lark_message_id` 可选，但建议让 agent 每次都带上；如果没带，服务会尝试从 botmux session 自动补齐首条话题根消息 ID。服务会按：
 
 ```text
 xianyu:<conversation_id>:<buyer_id>
@@ -235,6 +237,8 @@ GET /sessions/:correlation_id
 - `FEISHU_APP_ID` / `FEISHU_APP_SECRET`：默认飞书应用凭证。
 - `FEISHU_REPLY_APP_ID` / `FEISHU_REPLY_APP_SECRET`：可选，用另一个机器人发送飞书 thread reply；不填则回退到 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`。
 - `FEISHU_REPLY_MENTION_OPEN_ID` / `FEISHU_REPLY_MENTION_NAME`：可选，thread reply 前置 @，用于唤醒原 agent 机器人。
+- `BOTMUX_TARGET_APP_ID`：原 agent 机器人 app_id，用于读取 `~/.botmux/data/sessions-<app_id>.json` 并自动保存首条话题锚点；不填会回退到 `FEISHU_APP_ID`。
+- `BOTMUX_TARGET_SESSIONS_PATH`：可选，显式指定 botmux session 文件路径，Docker 里常用于挂载宿主机 session 文件。
 - `THREAD_ANCHOR_STORE_PATH`：飞书锚点落盘文件，Docker Compose 默认写到 `/app/work/thread-anchors.json`。
 
 如果设置了 `AGENT_REPLY_TOKEN`，本服务会把 `apiproxy_reply_token` 一并投递到话题群 payload，方便 agent 回写。

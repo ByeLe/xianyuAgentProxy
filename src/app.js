@@ -98,7 +98,13 @@ function applyErrorMiddleware(app) {
   });
 }
 
-export function createApp({ config, store, postJson = defaultPostJson, feishuClient = null } = {}) {
+export function createApp({
+  config,
+  store,
+  postJson = defaultPostJson,
+  feishuClient = null,
+  botmuxSessionReader = null
+} = {}) {
   const app = new Koa();
   const router = new Router();
   const sessionStore = store || new SessionStore({
@@ -164,10 +170,18 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
     const topicResult = await postJson(config.topicWebhookUrl, topicPayload, {
       timeoutMs: config.requestTimeoutMs
     });
+    const targetSessionId = topicResult.body?.target?.sessionId || topicResult.body?.sessionId || '';
+    const threadAnchorFromBotmux = await rememberBotmuxRootAnchor({
+      botmuxSessionReader,
+      sessionStore,
+      session,
+      targetSessionId
+    });
 
     const updated = sessionStore.update(session.correlation_id, {
       status: 'queued',
-      topic_response: topicResult.body
+      topic_response: topicResult.body,
+      lark_anchor_message_id: threadAnchorFromBotmux?.lark_message_id || ''
     });
 
     ctx.status = 202;
@@ -177,6 +191,7 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
       status: updated.status,
       apiproxy_reply_url: topicPayload.apiproxy_reply_url,
       thread_key: updated.thread_key,
+      lark_anchor_message_id: threadAnchorFromBotmux?.lark_message_id || '',
       topic: topicResult.body
     };
 
@@ -185,7 +200,8 @@ export function createApp({ config, store, postJson = defaultPostJson, feishuCli
       thread_key: updated.thread_key,
       action: topicResult.body?.action,
       trigger_id: topicResult.body?.triggerId,
-      session_id: topicResult.body?.target?.sessionId,
+      session_id: targetSessionId,
+      lark_anchor_message_id: threadAnchorFromBotmux?.lark_message_id || '',
       chat_id: topicResult.body?.target?.chatId
     });
   });
@@ -288,6 +304,34 @@ function rememberLarkAnchor(store, session, larkMessageId) {
     thread_key: anchor.thread_key,
     lark_message_id: anchor.lark_message_id,
     last_correlation_id: anchor.last_correlation_id
+  });
+  return anchor;
+}
+
+async function rememberBotmuxRootAnchor({
+  botmuxSessionReader,
+  sessionStore,
+  session,
+  targetSessionId
+}) {
+  if (!botmuxSessionReader?.enabled || !targetSessionId) return null;
+
+  const result = await botmuxSessionReader.waitForRootMessageId(targetSessionId);
+  if (!result?.rootMessageId) {
+    logInfo('botmux.root_anchor.missing', {
+      correlation_id: session.correlation_id,
+      thread_key: session.thread_key,
+      target_session_id: targetSessionId
+    });
+    return null;
+  }
+
+  const anchor = rememberLarkAnchor(sessionStore, session, result.rootMessageId);
+  logInfo('botmux.root_anchor.saved', {
+    correlation_id: session.correlation_id,
+    thread_key: session.thread_key,
+    target_session_id: targetSessionId,
+    lark_message_id: anchor?.lark_message_id || ''
   });
   return anchor;
 }

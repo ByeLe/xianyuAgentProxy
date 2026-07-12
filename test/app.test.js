@@ -143,6 +143,58 @@ test('已有飞书话题锚点时，闲鱼消息会回复到原话题', async ()
   }
 });
 
+test('首条 webhook 返回 botmux session 后，会自动保存飞书话题根消息锚点', async () => {
+  const config = {
+    publicBaseUrl: 'http://proxy.local',
+    topicWebhookUrl: 'http://topic.local/webhook',
+    xianyuSendUrl: 'http://xianyu.local/send',
+    xianyuSendToken: '',
+    xianyuInboundToken: '',
+    agentReplyToken: '',
+    requestTimeoutMs: 1000,
+    sessionTtlMs: 60000,
+    threadAnchorStorePath: '',
+    mockXianyuSend: false
+  };
+  const store = new SessionStore({ ttlMs: config.sessionTtlMs });
+
+  const app = createApp({
+    config,
+    store,
+    postJson: async () => ({
+      status: 200,
+      body: {
+        ok: true,
+        action: 'queued',
+        target: { sessionId: 'target_session_1' }
+      }
+    }),
+    botmuxSessionReader: {
+      enabled: true,
+      waitForRootMessageId: async (sessionId) => ({
+        session: { sessionId },
+        rootMessageId: 'om_root'
+      })
+    }
+  });
+
+  const { server, baseUrl } = await listen(app);
+  try {
+    const result = await postJson(`${baseUrl}/xianyu/message`, {
+      conversation_id: 'cid_1',
+      buyer_id: 'buyer_1',
+      buyer_name: '买家',
+      message_text: '第一条'
+    });
+
+    assert.equal(result.status, 202);
+    assert.equal(result.body.lark_anchor_message_id, 'om_root');
+    assert.equal(store.getThreadAnchor('xianyu:cid_1:buyer_1').lark_message_id, 'om_root');
+  } finally {
+    server.close();
+  }
+});
+
 test('飞书话题回复会带上目标机器人 mention', async () => {
   const requests = [];
   const client = new FeishuClient({
